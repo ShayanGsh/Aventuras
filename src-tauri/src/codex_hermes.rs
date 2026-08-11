@@ -308,8 +308,7 @@ fn apply_codex_headers(
 ) -> reqwest::RequestBuilder {
     let request = request
         .bearer_auth(&auth.access_token)
-        .header("originator", CODEX_ORIGINATOR)
-        .header("Accept", "application/json");
+        .header("originator", CODEX_ORIGINATOR);
     match auth.account_id.as_deref() {
         Some(account_id) if !account_id.is_empty() => {
             request.header("ChatGPT-Account-Id", account_id)
@@ -482,10 +481,15 @@ pub async fn codex_hermes_logout(app: AppHandle) -> Result<(), String> {
 pub async fn codex_hermes_list_models(app: AppHandle) -> Result<Vec<CodexHermesModel>, String> {
     let auth = resolve_auth(&app).await?;
     let client = http_client()?;
-    let response = apply_codex_headers(client.get(CODEX_MODELS_URL), &auth)
-        .send()
-        .await
-        .map_err(|error| format!("Failed to fetch Codex-Hermes models: {error}"))?;
+    let response = apply_codex_headers(
+        client
+            .get(CODEX_MODELS_URL)
+            .header("Accept", "application/json"),
+        &auth,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("Failed to fetch Codex-Hermes models: {error}"))?;
     if !response.status().is_success() {
         return Err(response_error("Codex-Hermes model discovery failed", response).await);
     }
