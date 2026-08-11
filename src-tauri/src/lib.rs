@@ -11,6 +11,9 @@ use backup::{
     backup_database, export_images_zip, export_single_image, export_story_avt, import_saf_to_temp,
     restore_database,
 };
+use codex::{
+    codex_account_read, codex_disconnect, codex_list_models, codex_login_start, codex_logout,
+};
 use sync::commands::{
     clear_received_stories, get_received_stories, start_sync_server, stop_sync_server,
     sync_connect, sync_pull_story, sync_push_story,
@@ -277,6 +280,11 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
+            codex_account_read,
+            codex_login_start,
+            codex_logout,
+            codex_list_models,
+            codex_disconnect,
             start_sync_server,
             stop_sync_server,
             get_received_stories,

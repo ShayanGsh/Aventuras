@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -18,6 +19,73 @@ const NOTIFICATION_BUFFER: usize = 256;
 pub struct CodexNotification {
     pub method: String,
     pub params: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccount {
+    #[serde(rename = "type")]
+    pub auth_mode: String,
+    pub email: Option<String>,
+    pub plan_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountState {
+    pub account: Option<CodexAccount>,
+    pub requires_openai_auth: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLoginStart {
+    #[serde(rename = "type")]
+    pub login_type: String,
+    pub login_id: Option<String>,
+    pub auth_url: Option<String>,
+    pub verification_url: Option<String>,
+    pub user_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelReasoningEffort {
+    pub reasoning_effort: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModel {
+    pub id: String,
+    pub model: Option<String>,
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub supported_reasoning_efforts: Vec<CodexModelReasoningEffort>,
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexModelListPage {
+    #[serde(default)]
+    data: Vec<CodexModel>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexLoginCompleted {
+    login_id: Option<String>,
+    success: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +342,124 @@ impl CodexState {
     }
 }
 
+#[tauri::command]
+pub async fn codex_account_read(state: State<'_, CodexState>) -> Result<CodexAccountState, String> {
+    let connection = state.connection().await?;
+    let response = connection.request("account/read", json!({})).await?;
+    serde_json::from_value(response)
+        .map_err(|error| format!("Codex returned an invalid account response: {error}"))
+}
+
+#[tauri::command]
+pub async fn codex_login_start(
+    app: AppHandle,
+    state: State<'_, CodexState>,
+) -> Result<CodexLoginStart, String> {
+    let connection = state.connection().await?;
+    let mut notifications = connection.subscribe();
+    let response = connection
+        .request(
+            "account/login/start",
+            json!({
+                "type": "chatgpt",
+                "useHostedLoginSuccessPage": true,
+                "appBrand": "chatgpt"
+            }),
+        )
+        .await?;
+    let login: CodexLoginStart = serde_json::from_value(response)
+        .map_err(|error| format!("Codex returned an invalid login response: {error}"))?;
+
+    let login_id = login.login_id.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let notification = match notifications.recv().await {
+                Ok(notification) => notification,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+
+            if notification.method != "account/login/completed" {
+                continue;
+            }
+
+            let notification_login_id = notification
+                .params
+                .get("loginId")
+                .and_then(Value::as_str)
+                .map(String::from);
+            if login_id.is_some() && notification_login_id != login_id {
+                continue;
+            }
+
+            let success = notification
+                .params
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let error = notification
+                .params
+                .get("error")
+                .and_then(Value::as_str)
+                .map(String::from);
+
+            let _ = app.emit(
+                "codex-login-completed",
+                CodexLoginCompleted {
+                    login_id: notification_login_id,
+                    success,
+                    error,
+                },
+            );
+            break;
+        }
+    });
+
+    Ok(login)
+}
+
+#[tauri::command]
+pub async fn codex_logout(state: State<'_, CodexState>) -> Result<(), String> {
+    let connection = state.connection().await?;
+    connection.request("account/logout", json!({})).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn codex_list_models(state: State<'_, CodexState>) -> Result<Vec<CodexModel>, String> {
+    let connection = state.connection().await?;
+    let mut models = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let mut params = json!({
+            "limit": 100,
+            "includeHidden": false
+        });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = Value::String(cursor.clone());
+        }
+
+        let response = connection.request("model/list", params).await?;
+        let page: CodexModelListPage = serde_json::from_value(response)
+            .map_err(|error| format!("Codex returned an invalid model list: {error}"))?;
+        models.extend(page.data);
+
+        match page.next_cursor {
+            Some(next_cursor) if !next_cursor.is_empty() => cursor = Some(next_cursor),
+            _ => break,
+        }
+    }
+
+    Ok(models)
+}
+
+#[tauri::command]
+pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
+    state.disconnect().await;
+    Ok(())
+}
+
 fn build_request(id: u64, method: &str, params: Value) -> Value {
     json!({ "method": method, "id": id, "params": params })
 }
@@ -340,5 +526,55 @@ mod tests {
             build_notification("initialized", json!({})),
             json!({ "method": "initialized", "params": {} })
         );
+    }
+
+    #[test]
+    fn parses_account_state_from_app_server_response() {
+        let account: super::CodexAccountState = serde_json::from_value(json!({
+            "account": {
+                "type": "chatgpt",
+                "email": "writer@example.com",
+                "planType": "plus"
+            },
+            "requiresOpenaiAuth": true
+        }))
+        .expect("account response should parse");
+
+        assert_eq!(
+            account
+                .account
+                .expect("account should be present")
+                .auth_mode,
+            "chatgpt"
+        );
+        assert!(account.requires_openai_auth);
+    }
+
+    #[test]
+    fn parses_model_capabilities_from_app_server_response() {
+        let page: super::CodexModelListPage = serde_json::from_value(json!({
+            "data": [{
+                "id": "gpt-5.6-sol",
+                "model": "gpt-5.6-sol",
+                "displayName": "GPT-5.6-Sol",
+                "hidden": false,
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [{
+                    "reasoningEffort": "max",
+                    "description": "Highest effort"
+                }],
+                "inputModalities": ["text", "image"],
+                "isDefault": true
+            }],
+            "nextCursor": null
+        }))
+        .expect("model response should parse");
+
+        assert_eq!(page.data[0].id, "gpt-5.6-sol");
+        assert_eq!(
+            page.data[0].supported_reasoning_efforts[0].reasoning_effort,
+            "max"
+        );
+        assert!(page.next_cursor.is_none());
     }
 }
