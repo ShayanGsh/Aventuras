@@ -137,7 +137,15 @@
 
   let effectiveProfileId = $derived(profileId || settings.getDefaultProfileIdForProvider())
 
-  const REASONING_LEVELS: ReasoningEffort[] = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']
+  const REASONING_LEVELS: ReasoningEffort[] = [
+    'none',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+  ]
   const REASONING_LABELS: Record<ReasoningEffort, string> = {
     none: 'Off',
     minimal: 'Minimal',
@@ -145,6 +153,7 @@
     medium: 'Medium',
     high: 'High',
     xhigh: 'Extra',
+    max: 'Max',
   }
 
   function getReasoningIndex(value?: ReasoningEffort): number {
@@ -370,7 +379,7 @@
             value={reasoningValue}
             type="single"
             min={1}
-            max={5}
+            max={REASONING_LEVELS.length - 1}
             step={1}
             onValueChange={(v) => onReasoningChange(getReasoningValue(v))}
           />
@@ -380,13 +389,14 @@
             <span>Med</span>
             <span>High</span>
             <span>Extra</span>
+            <span>Max</span>
           </div>
         {:else}
           <Slider
             value={reasoningValue}
             type="single"
             min={0}
-            max={5}
+            max={REASONING_LEVELS.length - 1}
             step={1}
             onValueChange={(v) => onReasoningChange(getReasoningValue(v))}
           />
@@ -397,6 +407,7 @@
             <span>Med</span>
             <span>High</span>
             <span>Extra</span>
+            <span>Max</span>
           </div>
         {/if}
       </div>

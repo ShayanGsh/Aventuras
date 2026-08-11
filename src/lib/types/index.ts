@@ -655,6 +655,7 @@ export type ProviderType =
   | 'llamacpp' // @ai-sdk/openai (local, default localhost:8080)
   | 'nvidia-nim' // @ai-sdk/openai (NVIDIA NIM)
   | 'openai-compatible' // @ai-sdk/openai-compatible (requires custom baseUrl)
+  | 'openai-codex' // Codex App Server (ChatGPT sign-in)
   | 'openai' // @ai-sdk/openai
   | 'anthropic' // @ai-sdk/anthropic
   | 'google' // @ai-sdk/google
@@ -708,7 +709,7 @@ export interface APISettings {
   llmTimeoutMs: number // Request timeout in milliseconds (default: 360000 = 6 minutes)
 }
 
-export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 import type { ThemeId as ThemeIdImport } from '../../themes/themes'
 export type ThemeId = ThemeIdImport

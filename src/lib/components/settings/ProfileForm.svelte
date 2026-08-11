@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ProviderType, TextModel } from '$lib/types'
+  import type { CodexAccount } from '$lib/services/codex'
   import { PROVIDERS, hasDefaultEndpoint } from '$lib/services/ai/sdk/providers/config'
   import ProviderTypeSelector from './ProviderTypeSelector.svelte'
   import { isMobileDevice } from '$lib/utils/swipe'
@@ -41,9 +42,14 @@
     // UI state (from parent)
     isFetchingModels: boolean
     fetchError: string | null
+    codexAccount: CodexAccount | null
+    isCodexLoggingIn: boolean
+    codexError: string | null
 
     // Callbacks
     onFetchModels: () => void
+    onCodexLogin: () => void
+    onCodexLogout: () => void
     onProviderTypeChange: (type: ProviderType) => void
     onRemoveFetchedModel: (model: string) => void
     onRemoveCustomModel: (model: string) => void
@@ -67,7 +73,12 @@
     pingEnabled = $bindable(),
     isFetchingModels,
     fetchError,
+    codexAccount,
+    isCodexLoggingIn,
+    codexError,
     onFetchModels,
+    onCodexLogin,
+    onCodexLogout,
     onProviderTypeChange,
     onRemoveFetchedModel,
     onRemoveCustomModel,
@@ -171,7 +182,7 @@
   <ProviderTypeSelector value={providerType} onchange={handleProviderTypeChange} />
 
   <!-- Alert for providers without services -->
-  {#if !PROVIDERS[providerType].services}
+  {#if !PROVIDERS[providerType].services && !PROVIDERS[providerType].capabilities.modelCapabilityFetching}
     <Alert class="border-yellow-500/50 bg-yellow-500/10">
       <AlertCircle class="h-4 w-4 text-yellow-500" />
       <AlertDescription class="text-xs">
@@ -193,7 +204,7 @@
         class="font-mono text-xs"
       />
     </div>
-  {:else}
+  {:else if providerType !== 'openai-codex'}
     <div class="space-y-1">
       <button
         class="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium transition-colors"
@@ -219,13 +230,57 @@
   {/if}
 
   <!-- API Key -->
-  <Input
-    label={isSelfHostedUrl(baseUrl) ? 'API Key (optional)' : 'API Key'}
-    type="password"
-    placeholder="sk-..."
-    bind:value={apiKey}
-    class="font-mono text-xs"
-  />
+  {#if providerType === 'openai-codex'}
+    <div class="space-y-2">
+      <Label>ChatGPT account</Label>
+      <div class="bg-muted/30 space-y-2 rounded-md border p-3">
+        <p class="text-muted-foreground text-xs">
+          Sign in through Codex. Aventuras never stores your ChatGPT credentials or OAuth token.
+        </p>
+        {#if codexAccount}
+          <div class="text-sm">
+            <p class="font-medium">
+              Signed in{codexAccount.email ? ` as ${codexAccount.email}` : ''}
+            </p>
+            {#if codexAccount.planType}
+              <p class="text-muted-foreground text-xs capitalize">{codexAccount.planType} plan</p>
+            {/if}
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" onclick={onCodexLogin} disabled={isCodexLoggingIn}>
+              {isCodexLoggingIn ? 'Signing in...' : 'Reauthenticate'}
+            </Button>
+            <Button variant="ghost" size="sm" onclick={onCodexLogout} disabled={isCodexLoggingIn}>
+              Sign out
+            </Button>
+          </div>
+        {:else}
+          <Button size="sm" onclick={onCodexLogin} disabled={isCodexLoggingIn}>
+            {isCodexLoggingIn ? 'Opening sign-in...' : 'Sign in with ChatGPT'}
+          </Button>
+        {/if}
+        {#if isCodexLoggingIn}
+          <p class="text-muted-foreground text-xs">
+            Complete sign-in in your browser, then return here.
+          </p>
+        {/if}
+        {#if codexError}
+          <Alert variant="destructive">
+            <AlertCircle class="h-4 w-4" />
+            <AlertDescription class="text-xs">{codexError}</AlertDescription>
+          </Alert>
+        {/if}
+      </div>
+    </div>
+  {:else}
+    <Input
+      label={isSelfHostedUrl(baseUrl) ? 'API Key (optional)' : 'API Key'}
+      type="password"
+      placeholder="sk-..."
+      bind:value={apiKey}
+      class="font-mono text-xs"
+    />
+  {/if}
 
   <!-- Models Section -->
   <div class="flex flex-col gap-2">

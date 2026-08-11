@@ -65,6 +65,7 @@ const PROVIDER_OPTIONS_KEY: Record<ProviderType, string> = {
   // reads the raw one but emits a deprecation warning for it.
   'nvidia-nim': 'nvidiaNim',
   'openai-compatible': 'openaiCompatible',
+  'openai-codex': 'openaiCodex',
   openai: 'openai',
   anthropic: 'anthropic',
   google: 'google',
@@ -78,6 +79,12 @@ const PROVIDER_OPTIONS_KEY: Record<ProviderType, string> = {
 /** Shared middleware instance for extracting reasoning from <think> tags */
 const thinkTagMiddleware = extractReasoningMiddleware({ tagName: 'think' })
 
+type SdkReasoningEffort = Exclude<ReasoningEffort, 'max'>
+
+function normalizeSdkReasoningEffort(effort: ReasoningEffort): SdkReasoningEffort {
+  return effort === 'max' ? 'xhigh' : effort
+}
+
 /**
  * Build provider-specific options from preset settings.
  */
@@ -87,7 +94,7 @@ export function buildProviderOptions(
 ): SharedV4ProviderOptions | undefined {
   let options: JSONObject = {}
 
-  const reasoning_effort = preset.reasoningEffort
+  const reasoning_effort = normalizeSdkReasoningEffort(preset.reasoningEffort)
 
   if (!settings.advancedRequestSettings.manualMode) {
     switch (providerType) {
@@ -120,6 +127,9 @@ export function buildProviderOptions(
       case 'nvidia-nim':
       case 'openai-compatible':
         options = { reasoningEffort: reasoning_effort }
+        break
+      case 'openai-codex':
+        // Codex turns receive reasoning effort through the native App Server params.
         break
       case 'pollinations':
         options = {
@@ -171,7 +181,7 @@ interface ResolvedConfig {
   providerType: ProviderType
   model: LanguageModelV4
   providerOptions?: SharedV4ProviderOptions
-  reasoning: ReasoningEffort
+  reasoning: SdkReasoningEffort
   supportsStructuredOutput: boolean
   useThinkTag: boolean
 }
@@ -183,7 +193,7 @@ interface NarrativeConfig {
   temperature: number
   maxTokens: number
   providerOptions?: SharedV4ProviderOptions
-  reasoning: ReasoningEffort
+  reasoning: SdkReasoningEffort
   useThinkTag: boolean
 }
 
@@ -236,7 +246,7 @@ function resolveConfig(presetId: string, serviceId: string, debugId?: string): R
     providerType: profile.providerType,
     model,
     providerOptions,
-    reasoning: preset.reasoningEffort,
+    reasoning: normalizeSdkReasoningEffort(preset.reasoningEffort),
     supportsStructuredOutput: structuredOutputs,
     useThinkTag,
   }
@@ -261,7 +271,7 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     manualBody: settings.apiSettings.manualBody ?? '',
   })
 
-  const reasoningEffort = settings.apiSettings.reasoningEffort
+  const reasoningEffort = normalizeSdkReasoningEffort(settings.apiSettings.reasoningEffort)
 
   const narrativePreset: GenerationPreset = {
     id: '_narrative',

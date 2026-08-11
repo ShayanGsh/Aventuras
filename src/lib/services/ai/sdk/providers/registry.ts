@@ -150,6 +150,11 @@ function createProviderFromProfile(options: {
         fetch,
       })
 
+    case 'openai-codex':
+      throw new Error(
+        'OpenAI Codex profiles use the Codex App Server and are not Vercel AI SDK providers',
+      )
+
     case 'xai':
       return createXai({ apiKey: profile.apiKey, baseURL, fetch })
 

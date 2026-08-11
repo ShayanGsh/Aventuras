@@ -69,7 +69,10 @@ function normalizeProfile(profile: APIProfile): APIProfile {
 }
 
 function normalizeReasoningEffort(value?: string | null): ReasoningEffort | undefined {
-  if (value && ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)) {
+  if (
+    value &&
+    ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)
+  ) {
     return value != 'off' ? (value as ReasoningEffort) : 'none'
   } else {
     return undefined
