@@ -3,6 +3,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod avt_import;
 mod backup;
+mod codex;
 mod migration_patch;
 mod sync;
 
@@ -248,6 +249,7 @@ pub fn run() {
     }
 
     builder
+        .manage(codex::CodexState::default())
         .manage(sync::SyncState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(
