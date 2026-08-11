@@ -73,6 +73,16 @@ export type CodexToolExecutor = (
   context: { toolCallId: string; signal?: AbortSignal },
 ) => Promise<unknown>
 
+interface CodexToolCallRequest {
+  requestId: number | string
+  threadId: string
+  turnId: string
+  callId: string | null
+  namespace: string | null
+  tool: string
+  arguments: unknown
+}
+
 export interface CodexTurnCompleted {
   threadId: string
   turnId: string
@@ -100,6 +110,22 @@ function createAbortError(): Error {
   const error = new Error('Codex turn interrupted')
   error.name = 'AbortError'
   return error
+}
+
+function serializeToolOutput(output: unknown): string {
+  if (typeof output === 'string') return output
+  try {
+    return JSON.stringify(output) ?? ''
+  } catch {
+    return String(output)
+  }
+}
+
+function toolResponse(output: unknown, success: boolean) {
+  return {
+    contentItems: [{ type: 'inputText', text: serializeToolOutput(output) }],
+    success,
+  }
 }
 
 class CodexService {
@@ -155,6 +181,7 @@ class CodexService {
     if (request.signal?.aborted) throw createAbortError()
 
     const buffered: CodexTurnStreamEvent[] = []
+    const bufferedToolCalls: CodexToolCallRequest[] = []
     const queued: CodexTurnStreamEvent[] = []
     let handle: CodexTurnHandle | null = null
     let closed = false
@@ -190,8 +217,45 @@ class CodexService {
       })
     }
 
+    const executeToolCall = async (toolCall: CodexToolCallRequest) => {
+      const toolCallId = toolCall.callId || String(toolCall.requestId)
+      try {
+        if (!request.toolExecutor) {
+          throw new Error(`No executor is registered for Codex tool ${toolCall.tool}`)
+        }
+        const output = await request.toolExecutor(toolCall.tool, toolCall.arguments, {
+          toolCallId,
+          signal: request.signal,
+        })
+        await invoke('codex_tool_call_respond', {
+          requestId: toolCall.requestId,
+          result: toolResponse(output, true),
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        try {
+          await invoke('codex_tool_call_respond', {
+            requestId: toolCall.requestId,
+            result: toolResponse(message, false),
+          })
+        } catch {
+          // The turn will surface the app-server failure if its response cannot be sent.
+        }
+      }
+    }
+
+    const acceptToolCall = (toolCall: CodexToolCallRequest) => {
+      if (!handle) {
+        bufferedToolCalls.push(toolCall)
+        return
+      }
+      if (toolCall.threadId !== handle.threadId || toolCall.turnId !== handle.turnId) return
+      void executeToolCall(toolCall)
+    }
+
     let unlistenDelta: (() => void) | undefined
     let unlistenCompleted: (() => void) | undefined
+    let unlistenToolCall: (() => void) | undefined
     let abortHandler: (() => void) | undefined
 
     try {
@@ -201,9 +265,13 @@ class CodexService {
       unlistenCompleted = await listen<CodexTurnCompleted>('codex-turn-completed', (event) => {
         accept({ type: 'completed', payload: event.payload })
       })
+      unlistenToolCall = await listen<CodexToolCallRequest>('codex-tool-call', (event) => {
+        acceptToolCall(event.payload)
+      })
 
       handle = await this.startTurn(request)
       for (const event of buffered.splice(0)) accept(event)
+      for (const toolCall of bufferedToolCalls.splice(0)) acceptToolCall(toolCall)
 
       if (request.signal) {
         abortHandler = () => {
@@ -241,6 +309,7 @@ class CodexService {
       }
       unlistenDelta?.()
       unlistenCompleted?.()
+      unlistenToolCall?.()
       if (wake) {
         const resolve = wake
         wake = null

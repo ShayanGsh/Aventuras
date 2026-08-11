@@ -329,7 +329,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       structuredOutput: false,
       reasoning: true,
       modelCapabilityFetching: true,
-      toolCalling: false,
+      toolCalling: true,
     },
     // Authentication and generation use the native Codex App Server exposed by
     // the installed Codex CLI.
@@ -347,7 +347,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       structuredOutput: false,
       reasoning: true,
       modelCapabilityFetching: true,
-      toolCalling: false,
+      toolCalling: true,
     },
     // Authentication and generation use Aventuras' own direct OAuth
     // transport rather than the installed Codex CLI.

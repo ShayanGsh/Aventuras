@@ -17,6 +17,7 @@ import { createDeepSeek } from '@ai-sdk/deepseek'
 import { createMistral } from '@ai-sdk/mistral'
 
 import type { APIProfile } from '$lib/types'
+import type { CodexToolExecutor } from '$lib/services/codex'
 import { createTimeoutFetch } from './fetch'
 import { PROVIDERS, getBaseUrl } from './config'
 import { settings } from '$lib/stores/settings.svelte'
@@ -30,8 +31,18 @@ export function createModelFromProfile(options: {
   structuredOutputs?: boolean
   manualBody?: string
   serviceId?: string
+  toolExecutor?: CodexToolExecutor
 }): LanguageModelV4 {
-  const { profile, modelId, presetId, debugId, structuredOutputs, manualBody, serviceId } = options
+  const {
+    profile,
+    modelId,
+    presetId,
+    debugId,
+    structuredOutputs,
+    manualBody,
+    serviceId,
+    toolExecutor,
+  } = options
   const provider = createProviderFromProfile({
     profile,
     presetId,
@@ -39,6 +50,7 @@ export function createModelFromProfile(options: {
     structuredOutputs,
     manualBody,
     serviceId,
+    toolExecutor,
   })
 
   return provider(modelId) as LanguageModelV4
@@ -51,8 +63,10 @@ function createProviderFromProfile(options: {
   structuredOutputs?: boolean
   manualBody?: string
   serviceId?: string
+  toolExecutor?: CodexToolExecutor
 }) {
-  const { profile, presetId, debugId, structuredOutputs, manualBody, serviceId } = options
+  const { profile, presetId, debugId, structuredOutputs, manualBody, serviceId, toolExecutor } =
+    options
   const fetch = createTimeoutFetch(
     settings.apiSettings.llmTimeoutMs,
     serviceId ?? presetId,
@@ -152,10 +166,11 @@ function createProviderFromProfile(options: {
       })
 
     case 'openai-codex':
-      return (modelId: string) => createCodexLanguageModel('openai-codex', modelId)
+      return (modelId: string) => createCodexLanguageModel('openai-codex', modelId, toolExecutor)
 
     case 'openai-codex-direct':
-      return (modelId: string) => createCodexLanguageModel('openai-codex-direct', modelId)
+      return (modelId: string) =>
+        createCodexLanguageModel('openai-codex-direct', modelId, toolExecutor)
 
     case 'xai':
       return createXai({ apiKey: profile.apiKey, baseURL, fetch })
