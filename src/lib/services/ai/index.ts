@@ -98,8 +98,6 @@ import type {
 import type { TranslationResult, UITranslationItem } from './utils'
 import { recentContent, AS_HAYSTACK, AS_PROSE } from '$lib/utils/recentContent'
 import { joinPromptBlocks } from '$lib/utils/promptBlocks'
-import { settings } from '$lib/stores/settings.svelte'
-import { isNativeCodexProvider } from './sdk/providers/config'
 
 // Timeline Fill service settings (per design doc section 3.1.4: Static Retrieval)
 export interface TimelineFillSettings {
@@ -740,16 +738,6 @@ class AIService {
     }
     const mode = timelineFillSettings.mode ?? 'static'
     if (mode !== 'agentic') return false
-
-    const agenticPresetId = settings.getServicePresetId('agenticRetrieval')
-    const agenticPreset = settings.generationPresets.find((p) => p.id === agenticPresetId)
-    const agenticProfile = settings.getProfile(
-      agenticPreset?.profileId ?? settings.apiSettings.mainNarrativeProfileId,
-    )
-    if (agenticProfile && isNativeCodexProvider(agenticProfile.providerType)) {
-      log('Using static retrieval because the selected Codex transport has no tool loop support')
-      return false
-    }
 
     return true
   }

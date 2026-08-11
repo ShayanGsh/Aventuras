@@ -36,12 +36,6 @@ export interface ProviderCapabilities {
   toolCalling?: boolean
 }
 
-export const CODEX_PROVIDER_TYPES = ['openai-codex', 'openai-codex-direct'] as const
-
-export function isNativeCodexProvider(providerType: ProviderType): boolean {
-  return (CODEX_PROVIDER_TYPES as readonly string[]).includes(providerType)
-}
-
 export interface ProviderServices {
   narrative: ServiceModelDefaults
   classification: ServiceModelDefaults
