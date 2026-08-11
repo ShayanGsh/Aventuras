@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import type { CodexToolCall, CodexToolExecutor, CodexToolResult } from './codex'
 
 export interface CodexDirectAccount {
   authMode: string
@@ -35,6 +36,8 @@ export interface CodexDirectTurnDelta {
   turnId: string
   content: string
   reasoning: string | null
+  toolCall?: CodexToolCall
+  toolResult?: CodexToolResult
 }
 
 export interface CodexDirectTurnCompleted {
@@ -48,8 +51,12 @@ export interface CodexDirectTurnRequest {
   model: string
   system: string
   prompt: string
+  input?: unknown[]
   reasoningEffort: string
   outputSchema?: unknown
+  tools?: unknown[]
+  toolChoice?: unknown
+  toolExecutor?: CodexToolExecutor
   signal?: AbortSignal
 }
 
@@ -89,8 +96,11 @@ class CodexDirectService {
       model: request.model,
       system: request.system,
       prompt: request.prompt,
+      input: request.input ?? null,
       reasoningEffort: request.reasoningEffort,
       outputSchema: request.outputSchema ?? null,
+      tools: request.tools ?? null,
+      toolChoice: request.toolChoice ?? null,
     })
   }
 

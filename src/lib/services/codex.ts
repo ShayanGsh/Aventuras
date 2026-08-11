@@ -46,7 +46,32 @@ export interface CodexTurnDelta {
   turnId: string
   content: string
   reasoning: string | null
+  toolCall?: CodexToolCall
+  toolResult?: CodexToolResult
 }
+
+export interface CodexToolCall {
+  id: string
+  name: string
+  input: unknown
+  providerExecuted?: boolean
+  dynamic?: boolean
+}
+
+export interface CodexToolResult {
+  id: string
+  name: string
+  result: unknown
+  isError?: boolean
+  providerExecuted?: boolean
+  dynamic?: boolean
+}
+
+export type CodexToolExecutor = (
+  toolName: string,
+  input: unknown,
+  context: { toolCallId: string; signal?: AbortSignal },
+) => Promise<unknown>
 
 export interface CodexTurnCompleted {
   threadId: string
@@ -59,8 +84,12 @@ export interface CodexTurnRequest {
   model: string
   system: string
   prompt: string
+  input?: unknown[]
   reasoningEffort: string
   outputSchema?: unknown
+  tools?: unknown[]
+  toolChoice?: unknown
+  toolExecutor?: CodexToolExecutor
   signal?: AbortSignal
 }
 
@@ -99,8 +128,11 @@ class CodexService {
       model: request.model,
       system: request.system,
       prompt: request.prompt,
+      input: request.input ?? null,
       reasoningEffort: request.reasoningEffort,
       outputSchema: request.outputSchema ?? null,
+      tools: request.tools ?? null,
+      toolChoice: request.toolChoice ?? null,
     })
   }
 

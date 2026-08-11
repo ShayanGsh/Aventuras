@@ -6,14 +6,24 @@ import type {
   LanguageModelV4Usage,
 } from '@ai-sdk/provider'
 import type { ProviderType } from '$lib/types'
-import { codexService, type CodexTurnRequest } from '$lib/services/codex'
+import {
+  codexService,
+  type CodexToolCall,
+  type CodexToolExecutor,
+  type CodexToolResult,
+  type CodexTurnRequest,
+} from '$lib/services/codex'
 import { codexDirectService } from '$lib/services/codexDirect'
 
 interface CodexTransport {
-  generateText(request: CodexTurnRequest): Promise<string>
   streamTurn(
     request: CodexTurnRequest,
-  ): AsyncIterable<{ content: string; reasoning: string | null }>
+  ): AsyncIterable<{
+    content: string
+    reasoning: string | null
+    toolCall?: CodexToolCall
+    toolResult?: CodexToolResult
+  }>
 }
 
 const EMPTY_USAGE: LanguageModelV4Usage = {
@@ -53,23 +63,96 @@ function contentText(content: unknown): string {
     .join('')
 }
 
-function buildPrompt(prompt: LanguageModelV4Prompt): { system: string; prompt: string } {
+function jsonString(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value) ?? '{}'
+  } catch {
+    return '{}'
+  }
+}
+
+function toolResultText(output: unknown): string {
+  if (!output || typeof output !== 'object') return jsonString(output)
+
+  const value = output as { type?: string; value?: unknown }
+  if (value.type === 'text' || value.type === 'error-text') {
+    return typeof value.value === 'string' ? value.value : jsonString(value.value)
+  }
+  if (value.type === 'json' || value.type === 'error-json') {
+    return jsonString(value.value)
+  }
+  if (value.type === 'content') return jsonString(value.value)
+  return jsonString(output)
+}
+
+function buildPrompt(prompt: LanguageModelV4Prompt): {
+  system: string
+  prompt: string
+  input: unknown[]
+} {
   const system = prompt
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n\n')
 
-  const conversation = prompt
-    .filter((message) => message.role !== 'system')
+  const conversationMessages = prompt.filter((message) => message.role !== 'system')
+  const conversation = conversationMessages
     .map((message) => {
       const text = contentText(message.content)
-      if (prompt.filter((item) => item.role !== 'system').length === 1) return text
+      if (conversationMessages.length === 1) return text
       return `${message.role}:\n${text}`
     })
     .filter(Boolean)
     .join('\n\n')
 
-  return { system, prompt: conversation }
+  const input: unknown[] = []
+  for (const message of conversationMessages) {
+    if (message.role === 'user') {
+      const text = contentText(message.content)
+      if (text) {
+        input.push({
+          role: 'user',
+          content: [{ type: 'input_text', text }],
+        })
+      }
+      continue
+    }
+
+    if (message.role === 'assistant') {
+      const text = contentText(
+        message.content.filter((part) => part.type === 'text') as typeof message.content,
+      )
+      if (text) {
+        input.push({
+          role: 'assistant',
+          content: [{ type: 'output_text', text }],
+        })
+      }
+
+      for (const part of message.content) {
+        if (part.type !== 'tool-call') continue
+        input.push({
+          type: 'function_call',
+          call_id: part.toolCallId,
+          name: part.toolName,
+          arguments: jsonString(part.input),
+        })
+      }
+      continue
+    }
+
+    for (const part of message.content) {
+      if (part.type !== 'tool-result') continue
+      input.push({
+        type: 'function_call_output',
+        call_id: part.toolCallId,
+        output: toolResultText(part.output),
+      })
+    }
+  }
+
+  return { system, prompt: conversation, input }
 }
 
 function reasoningEffort(options: LanguageModelV4CallOptions): string {
@@ -81,10 +164,9 @@ function outputSchema(options: LanguageModelV4CallOptions): unknown {
   return options.responseFormat?.type === 'json' ? options.responseFormat.schema : undefined
 }
 
-function unsupportedToolsError(): Error {
-  return new Error(
-    'OpenAI Codex profiles do not support Vercel AI SDK tool-loop calls. Assign a tool-capable provider to this service.',
-  )
+function functionTools(options: LanguageModelV4CallOptions): unknown[] | undefined {
+  const tools = options.tools?.filter((tool) => tool.type === 'function')
+  return tools?.length ? tools : undefined
 }
 
 function getTransport(providerType: ProviderType): CodexTransport {
@@ -94,8 +176,53 @@ function getTransport(providerType: ProviderType): CodexTransport {
 export function createCodexLanguageModel(
   providerType: 'openai-codex' | 'openai-codex-direct',
   modelId: string,
+  toolExecutor?: CodexToolExecutor,
 ): LanguageModelV4 {
   const transport = getTransport(providerType)
+
+  function buildRequest(options: LanguageModelV4CallOptions): CodexTurnRequest {
+    const { system, prompt, input } = buildPrompt(options.prompt)
+    return {
+      model: modelId,
+      system,
+      prompt,
+      input,
+      reasoningEffort: reasoningEffort(options),
+      outputSchema: outputSchema(options),
+      tools: functionTools(options),
+      toolChoice: options.toolChoice,
+      toolExecutor,
+      signal: options.abortSignal,
+    }
+  }
+
+  async function collect(request: CodexTurnRequest) {
+    let text = ''
+    let reasoning = ''
+    const toolCalls: CodexToolCall[] = []
+    const toolResults: CodexToolResult[] = []
+
+    for await (const delta of transport.streamTurn(request)) {
+      text += delta.content
+      if (delta.reasoning) reasoning += delta.reasoning
+      if (delta.toolCall) toolCalls.push(delta.toolCall)
+      if (delta.toolResult) toolResults.push(delta.toolResult)
+    }
+
+    return { text, reasoning, toolCalls, toolResults }
+  }
+
+  function finishReason(toolCalls: CodexToolCall[]) {
+    return toolCalls.some((toolCall) => !toolCall.providerExecuted)
+      ? { unified: 'tool-calls' as const, raw: 'tool_calls' }
+      : { unified: 'stop' as const, raw: 'stop' }
+  }
+
+  function resultValue(value: unknown): any {
+    if (value === undefined) return ''
+    if (value === null) return ''
+    return value
+  }
 
   return {
     specificationVersion: 'v4',
@@ -103,37 +230,41 @@ export function createCodexLanguageModel(
     modelId,
     supportedUrls: {},
     doGenerate: async (options) => {
-      if (options.tools?.length) throw unsupportedToolsError()
-
-      const { system, prompt } = buildPrompt(options.prompt)
-      const text = await transport.generateText({
-        model: modelId,
-        system,
-        prompt,
-        reasoningEffort: reasoningEffort(options),
-        outputSchema: outputSchema(options),
-        signal: options.abortSignal,
-      })
+      const result = await collect(buildRequest(options))
+      const content: Array<any> = []
+      if (result.reasoning) content.push({ type: 'reasoning', text: result.reasoning })
+      if (result.text) content.push({ type: 'text', text: result.text })
+      for (const toolCall of result.toolCalls) {
+        content.push({
+          type: 'tool-call',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          input: jsonString(toolCall.input),
+          providerExecuted: toolCall.providerExecuted,
+          dynamic: toolCall.dynamic,
+        })
+      }
+      for (const toolResult of result.toolResults) {
+        content.push({
+          type: 'tool-result',
+          toolCallId: toolResult.id,
+          toolName: toolResult.name,
+          result: resultValue(toolResult.result),
+          isError: toolResult.isError,
+          providerExecuted: toolResult.providerExecuted,
+          dynamic: toolResult.dynamic,
+        })
+      }
 
       return {
-        content: [{ type: 'text', text }],
-        finishReason: { unified: 'stop', raw: 'stop' },
+        content,
+        finishReason: finishReason(result.toolCalls),
         usage: EMPTY_USAGE,
         warnings: [],
       }
     },
     doStream: async (options) => {
-      if (options.tools?.length) throw unsupportedToolsError()
-
-      const { system, prompt } = buildPrompt(options.prompt)
-      const request: CodexTurnRequest = {
-        model: modelId,
-        system,
-        prompt,
-        reasoningEffort: reasoningEffort(options),
-        outputSchema: outputSchema(options),
-        signal: options.abortSignal,
-      }
+      const request = buildRequest(options)
 
       const stream = new ReadableStream<LanguageModelV4StreamPart>({
         async start(controller) {
@@ -141,6 +272,7 @@ export function createCodexLanguageModel(
           const reasoningId = 'codex-reasoning'
           let textStarted = false
           let reasoningStarted = false
+          const toolCalls: CodexToolCall[] = []
 
           controller.enqueue({ type: 'stream-start', warnings: [] })
 
@@ -165,13 +297,36 @@ export function createCodexLanguageModel(
                 }
                 controller.enqueue({ type: 'text-delta', id: textId, delta: delta.content })
               }
+
+              if (delta.toolCall) {
+                toolCalls.push(delta.toolCall)
+                controller.enqueue({
+                  type: 'tool-call',
+                  toolCallId: delta.toolCall.id,
+                  toolName: delta.toolCall.name,
+                  input: jsonString(delta.toolCall.input),
+                  providerExecuted: delta.toolCall.providerExecuted,
+                  dynamic: delta.toolCall.dynamic,
+                })
+              }
+
+              if (delta.toolResult) {
+                controller.enqueue({
+                  type: 'tool-result',
+                  toolCallId: delta.toolResult.id,
+                  toolName: delta.toolResult.name,
+                  result: resultValue(delta.toolResult.result),
+                  isError: delta.toolResult.isError,
+                  dynamic: delta.toolResult.dynamic,
+                })
+              }
             }
 
             if (reasoningStarted) controller.enqueue({ type: 'reasoning-end', id: reasoningId })
             if (textStarted) controller.enqueue({ type: 'text-end', id: textId })
             controller.enqueue({
               type: 'finish',
-              finishReason: { unified: 'stop', raw: 'stop' },
+              finishReason: finishReason(toolCalls),
               usage: EMPTY_USAGE,
             })
             controller.close()
