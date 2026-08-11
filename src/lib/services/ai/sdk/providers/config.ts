@@ -337,8 +337,8 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
   },
 
   'openai-codex-direct': {
-    name: 'OpenAI Codex direct',
-    description: 'Use ChatGPT sign-in with direct Codex HTTP access',
+    name: 'OpenAI Codex',
+    description: 'Use ChatGPT sign-in with Codex HTTP access',
     baseUrl: '',
     requiresApiKey: false,
     capabilities: {
