@@ -515,6 +515,7 @@ pub async fn codex_turn_start(
     system: String,
     prompt: String,
     reasoning_effort: String,
+    output_schema: Option<Value>,
 ) -> Result<CodexTurnHandle, String> {
     let connection = state.connection().await?;
     let thread_response = connection
@@ -534,25 +535,25 @@ pub async fn codex_turn_start(
         .map_err(|error| format!("Codex returned an invalid thread response: {error}"))?;
 
     let notifications = connection.subscribe();
-    let turn_response = connection
-        .request(
-            "turn/start",
-            json!({
-                "threadId": thread.thread.id,
-                "model": model,
-                "effort": reasoning_effort,
-                "approvalPolicy": "never",
-                "sandboxPolicy": {
-                    "type": "readOnly",
-                    "networkAccess": false
-                },
-                "input": [{
-                    "type": "text",
-                    "text": prompt
-                }]
-            }),
-        )
-        .await?;
+    let mut turn_params = json!({
+        "threadId": thread.thread.id,
+        "model": model,
+        "effort": reasoning_effort,
+        "approvalPolicy": "never",
+        "sandboxPolicy": {
+            "type": "readOnly",
+            "networkAccess": false
+        },
+        "input": [{
+            "type": "text",
+            "text": prompt
+        }]
+    });
+    if let Some(output_schema) = output_schema {
+        turn_params["outputSchema"] = output_schema;
+    }
+
+    let turn_response = connection.request("turn/start", turn_params).await?;
     let turn: CodexTurnStartResponse = serde_json::from_value(turn_response)
         .map_err(|error| format!("Codex returned an invalid turn response: {error}"))?;
 

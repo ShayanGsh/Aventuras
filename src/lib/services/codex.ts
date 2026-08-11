@@ -60,6 +60,7 @@ export interface CodexTurnRequest {
   system: string
   prompt: string
   reasoningEffort: string
+  outputSchema?: unknown
   signal?: AbortSignal
 }
 
@@ -99,6 +100,7 @@ class CodexService {
       system: request.system,
       prompt: request.prompt,
       reasoningEffort: request.reasoningEffort,
+      outputSchema: request.outputSchema ?? null,
     })
   }
 

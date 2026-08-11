@@ -31,6 +31,7 @@ import { loggingMiddleware, patchResponseMiddleware, promptSchemaMiddleware } fr
 import { retryOn429Middleware } from './middleware/retryMiddleware'
 import { createModelFromProfile } from './providers'
 import { getReasoningExtraction, GOOGLE_SAFETY_SETTINGS, PROVIDERS } from './providers/config'
+import { codexService } from '$lib/services/codex'
 
 const log = createLogger('Generate')
 
@@ -197,7 +198,10 @@ interface NarrativeConfig {
   useThinkTag: boolean
 }
 
-function resolveConfig(presetId: string, serviceId: string, debugId?: string): ResolvedConfig {
+function resolvePresetProfile(
+  presetId: string,
+  serviceId: string,
+): { preset: GenerationPreset; profile: APIProfile } {
   const preset = settings.getPresetConfig(presetId, serviceId)
   const profileId = preset.profileId ?? settings.apiSettings.mainNarrativeProfileId
   const profile = settings.getProfile(profileId)
@@ -206,7 +210,13 @@ function resolveConfig(presetId: string, serviceId: string, debugId?: string): R
     throw new Error(`Profile not found: ${profileId}`)
   }
 
-  const fetchedModel = settings.getProfileModels(profileId).find((m) => m.id === preset.model)
+  return { preset, profile }
+}
+
+function resolveConfig(presetId: string, serviceId: string, debugId?: string): ResolvedConfig {
+  const { preset, profile } = resolvePresetProfile(presetId, serviceId)
+
+  const fetchedModel = settings.getProfileModels(profile.id).find((m) => m.id === preset.model)
 
   let structuredOutputs = false
   switch (preset.structuredOutputOverride) {
@@ -301,6 +311,26 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
   }
 }
 
+function parseCodexStructuredOutput<T extends z.ZodType>(response: string, schema: T): z.infer<T> {
+  const trimmed = response.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const jsonText = fenced?.[1] ?? trimmed
+
+  let value: unknown
+  try {
+    value = JSON.parse(jsonText)
+  } catch {
+    value = JSON.parse(jsonrepair(jsonText))
+  }
+
+  try {
+    return schema.parse(value) as z.infer<T>
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Codex returned invalid structured output: ${message}`)
+  }
+}
+
 // ============================================================================
 // Middleware
 // ============================================================================
@@ -377,6 +407,19 @@ export async function generateStructured<T extends z.ZodType>(
   serviceId: string,
 ): Promise<z.infer<T>> {
   const { presetId, schema, system, prompt, signal } = options
+  const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
+  if (profile.providerType === 'openai-codex') {
+    const response = await codexService.generateText({
+      model: selectedPreset.model,
+      system,
+      prompt,
+      reasoningEffort: selectedPreset.reasoningEffort,
+      outputSchema: z.toJSONSchema(schema),
+      signal,
+    })
+    return parseCodexStructuredOutput(response, schema)
+  }
+
   const config = resolveConfig(presetId, serviceId)
   const {
     preset,
@@ -423,6 +466,17 @@ export async function generatePlainText(
   serviceId: string,
 ): Promise<string> {
   const { presetId, system, prompt, signal } = options
+  const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
+  if (profile.providerType === 'openai-codex') {
+    return codexService.generateText({
+      model: selectedPreset.model,
+      system,
+      prompt,
+      reasoningEffort: selectedPreset.reasoningEffort,
+      signal,
+    })
+  }
+
   const { preset, providerType, model, providerOptions, reasoning, useThinkTag } = resolveConfig(
     presetId,
     serviceId,
@@ -590,6 +644,17 @@ export function streamNarrative(options: NarrativeGenerateOptions) {
 
 export async function generateNarrative(options: NarrativeGenerateOptions): Promise<string> {
   const { system, prompt, signal } = options
+  const mainProfile = settings.getMainNarrativeProfile()
+  if (mainProfile?.providerType === 'openai-codex') {
+    return codexService.generateText({
+      model: settings.apiSettings.defaultModel,
+      system,
+      prompt,
+      reasoningEffort: settings.apiSettings.reasoningEffort,
+      signal,
+    })
+  }
+
   const { providerType, model, temperature, maxTokens, providerOptions, reasoning } =
     resolveNarrativeConfig()
 
