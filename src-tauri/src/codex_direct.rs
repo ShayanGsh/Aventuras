@@ -811,15 +811,21 @@ fn normalize_tools(tools: Option<Value>) -> Option<Value> {
             return None;
         }
 
-        let mut tool = tool.clone();
-        if let Some(input_schema) = tool.get("inputSchema").cloned() {
-            tool["parameters"] = input_schema;
-            tool.as_object_mut()?.remove("inputSchema");
+        let name = tool.get("name").and_then(Value::as_str)?;
+        let parameters = tool
+            .get("inputSchema")
+            .cloned()
+            .or_else(|| tool.get("parameters").cloned())?;
+        let mut normalized = json!({
+            "type": "function",
+            "name": name,
+            "parameters": parameters,
+            "strict": tool.get("strict").and_then(Value::as_bool).unwrap_or(false)
+        });
+        if let Some(description) = tool.get("description").and_then(Value::as_str) {
+            normalized["description"] = json!(description);
         }
-        if tool.get("strict").is_none() {
-            tool["strict"] = json!(false);
-        }
-        Some(tool)
+        Some(normalized)
     });
     let tools = tools.collect::<Vec<_>>();
     (!tools.is_empty()).then_some(Value::Array(tools))

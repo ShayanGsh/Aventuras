@@ -251,7 +251,6 @@ export function createCodexLanguageModel(
           toolName: toolResult.name,
           result: resultValue(toolResult.result),
           isError: toolResult.isError,
-          providerExecuted: toolResult.providerExecuted,
           dynamic: toolResult.dynamic,
         })
       }

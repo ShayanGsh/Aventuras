@@ -675,18 +675,23 @@ fn normalize_dynamic_tools(tools: Option<Value>) -> Option<Value> {
             return None;
         }
 
-        let mut tool = tool.clone();
-        if tool.get("inputSchema").is_none() {
-            if let Some(parameters) = tool.get("parameters").cloned() {
-                tool["inputSchema"] = parameters;
-            }
+        let name = tool.get("name").and_then(Value::as_str)?;
+        let input_schema = tool
+            .get("inputSchema")
+            .cloned()
+            .or_else(|| tool.get("parameters").cloned())?;
+        let mut normalized = json!({
+            "type": "function",
+            "name": name,
+            "inputSchema": input_schema
+        });
+        if let Some(description) = tool.get("description").and_then(Value::as_str) {
+            normalized["description"] = json!(description);
         }
-        if let Some(object) = tool.as_object_mut() {
-            object.remove("parameters");
-            object.remove("providerExecuted");
-            object.remove("dynamic");
+        if let Some(defer_loading) = tool.get("deferLoading").and_then(Value::as_bool) {
+            normalized["deferLoading"] = json!(defer_loading);
         }
-        Some(tool)
+        Some(normalized)
     });
     let tools = tools.collect::<Vec<_>>();
     (!tools.is_empty()).then_some(Value::Array(tools))
@@ -958,7 +963,10 @@ fn spawn_codex_process() -> Result<Child, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_notification, build_request};
+    use super::{
+        build_notification, build_request, dynamic_tool_call, dynamic_tool_result,
+        normalize_dynamic_tools,
+    };
     use serde_json::json;
 
     #[test]
@@ -1029,5 +1037,41 @@ mod tests {
             "max"
         );
         assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn normalizes_dynamic_function_tools() {
+        let tools = normalize_dynamic_tools(Some(json!([{
+            "type": "function",
+            "name": "lookup",
+            "description": "Look something up",
+            "inputSchema": { "type": "object" },
+            "providerOptions": { "internal": true }
+        }])))
+        .expect("function tool should be retained");
+
+        assert_eq!(tools[0]["name"], "lookup");
+        assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        assert!(tools[0].get("providerOptions").is_none());
+    }
+
+    #[test]
+    fn maps_dynamic_tool_lifecycle_items() {
+        let item = json!({
+            "type": "dynamicToolCall",
+            "id": "call_123",
+            "tool": "lookup",
+            "arguments": { "id": "ABC-123" },
+            "status": "completed",
+            "success": true,
+            "contentItems": [{ "type": "inputText", "text": "open" }]
+        });
+        let call = dynamic_tool_call(&item).expect("dynamic call should parse");
+        let result = dynamic_tool_result(&item).expect("dynamic result should parse");
+
+        assert_eq!(call.id, "call_123");
+        assert_eq!(call.input["id"], "ABC-123");
+        assert_eq!(result.result[0]["text"], "open");
+        assert!(!result.is_error);
     }
 }
