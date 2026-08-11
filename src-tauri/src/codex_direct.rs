@@ -79,6 +79,23 @@ struct CodexDirectTurnDelta {
     turn_id: String,
     content: String,
     reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call: Option<CodexDirectToolCall>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexDirectToolCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PendingFunctionCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -552,6 +569,9 @@ pub async fn codex_direct_turn_start(
     prompt: String,
     reasoning_effort: String,
     output_schema: Option<Value>,
+    input: Option<Value>,
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
 ) -> Result<CodexDirectTurnHandle, String> {
     let auth = resolve_auth(&app).await?;
     let turn_id = Uuid::new_v4().to_string();
@@ -579,6 +599,9 @@ pub async fn codex_direct_turn_start(
             &prompt,
             &reasoning_effort,
             output_schema,
+            input,
+            tools,
+            tool_choice,
             cancel_rx,
         )
         .await;
@@ -628,9 +651,21 @@ async fn run_turn(
     prompt: &str,
     reasoning_effort: &str,
     output_schema: Option<Value>,
+    input: Option<Value>,
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
     mut cancel: oneshot::Receiver<()>,
 ) -> TurnResult {
-    let body = build_turn_body(model, system, prompt, reasoning_effort, output_schema);
+    let body = build_turn_body(
+        model,
+        system,
+        prompt,
+        reasoning_effort,
+        output_schema,
+        input,
+        tools,
+        tool_choice,
+    );
     let client = match http_client() {
         Ok(client) => client,
         Err(error) => return TurnResult::Failed(error),
@@ -659,6 +694,8 @@ async fn run_turn(
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut emitted_text = false;
+    let mut pending_function_calls = HashMap::new();
+    let mut emitted_tool_calls = HashSet::new();
 
     loop {
         let chunk = tokio::select! {
@@ -679,7 +716,14 @@ async fn run_turn(
                 Ok(event) => event,
                 Err(error) => return TurnResult::Failed(error),
             };
-            if let Some(result) = handle_stream_event(app, handle, &event, &mut emitted_text) {
+            if let Some(result) = handle_stream_event(
+                app,
+                handle,
+                &event,
+                &mut emitted_text,
+                &mut pending_function_calls,
+                &mut emitted_tool_calls,
+            ) {
                 return result;
             }
         }
@@ -689,9 +733,14 @@ async fn run_turn(
         if let Some(event) = parse_sse_line(&buffer) {
             match event {
                 Ok(event) => {
-                    if let Some(result) =
-                        handle_stream_event(app, handle, &event, &mut emitted_text)
-                    {
+                    if let Some(result) = handle_stream_event(
+                        app,
+                        handle,
+                        &event,
+                        &mut emitted_text,
+                        &mut pending_function_calls,
+                        &mut emitted_tool_calls,
+                    ) {
                         return result;
                     }
                 }
@@ -700,7 +749,7 @@ async fn run_turn(
         }
     }
 
-    if emitted_text {
+    if emitted_text || !emitted_tool_calls.is_empty() {
         TurnResult::Completed
     } else {
         TurnResult::Failed("Codex direct stream ended without a response.".to_string())
@@ -713,17 +762,29 @@ fn build_turn_body(
     prompt: &str,
     reasoning_effort: &str,
     output_schema: Option<Value>,
+    input: Option<Value>,
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "instructions": system,
-        "input": [{
-            "role": "user",
-            "content": [{ "type": "input_text", "text": prompt }]
-        }],
+        "input": input.unwrap_or_else(|| {
+            json!([{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": prompt }]
+            }])
+        }),
         "store": false,
         "stream": true
     });
+
+    if let Some(tools) = normalize_tools(tools) {
+        body["tools"] = tools;
+    }
+    if let Some(tool_choice) = normalize_tool_choice(tool_choice) {
+        body["tool_choice"] = tool_choice;
+    }
 
     match wire_reasoning_effort(reasoning_effort) {
         Some(effort) => {
@@ -745,6 +806,41 @@ fn build_turn_body(
     }
 
     body
+}
+
+fn normalize_tools(tools: Option<Value>) -> Option<Value> {
+    let tools_value = tools?;
+    let tools = tools_value.as_array()?.iter().filter_map(|tool| {
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            return None;
+        }
+
+        let mut tool = tool.clone();
+        if let Some(input_schema) = tool.get("inputSchema").cloned() {
+            tool["parameters"] = input_schema;
+            tool.as_object_mut()?.remove("inputSchema");
+        }
+        if tool.get("strict").is_none() {
+            tool["strict"] = json!(false);
+        }
+        Some(tool)
+    });
+    let tools = tools.collect::<Vec<_>>();
+    (!tools.is_empty()).then_some(Value::Array(tools))
+}
+
+fn normalize_tool_choice(tool_choice: Option<Value>) -> Option<Value> {
+    let tool_choice = tool_choice?;
+    match tool_choice.get("type").and_then(Value::as_str) {
+        Some("auto") => Some(json!("auto")),
+        Some("none") => Some(json!("none")),
+        Some("required") => Some(json!("required")),
+        Some("tool") => tool_choice
+            .get("toolName")
+            .and_then(Value::as_str)
+            .map(|name| json!({ "type": "function", "name": name })),
+        _ => None,
+    }
 }
 
 fn wire_reasoning_effort(effort: &str) -> Option<&'static str> {
@@ -783,6 +879,8 @@ fn handle_stream_event(
     handle: &CodexDirectTurnHandle,
     event: &Value,
     emitted_text: &mut bool,
+    pending_function_calls: &mut HashMap<String, PendingFunctionCall>,
+    emitted_tool_calls: &mut HashSet<String>,
 ) -> Option<TurnResult> {
     let event_type = event
         .get("type")
@@ -829,7 +927,87 @@ fn handle_stream_event(
         }
     }
 
+    if event_type == "response.output_item.added" {
+        if let Some(item) = event.get("item") {
+            remember_function_call(item, pending_function_calls);
+        }
+    } else if event_type == "response.function_call_arguments.delta" {
+        if let (Some(item_id), Some(delta)) = (
+            event.get("item_id").and_then(Value::as_str),
+            event.get("delta").and_then(Value::as_str),
+        ) {
+            if let Some(call) = pending_function_calls.get_mut(item_id) {
+                call.arguments.push_str(delta);
+            }
+        }
+    } else if event_type == "response.function_call_arguments.done" {
+        if let Some(item_id) = event.get("item_id").and_then(Value::as_str) {
+            if let Some(call) = pending_function_calls.get_mut(item_id) {
+                if let Some(arguments) = event.get("arguments").and_then(Value::as_str) {
+                    call.arguments = arguments.to_string();
+                }
+                emit_function_call(app, handle, call, emitted_tool_calls);
+            }
+        }
+    } else if event_type == "response.output_item.done" {
+        if let Some(item) = event.get("item") {
+            if let Some(call) = remember_function_call(item, pending_function_calls) {
+                emit_function_call(app, handle, &call, emitted_tool_calls);
+            }
+        }
+    }
+
     None
+}
+
+fn remember_function_call(
+    item: &Value,
+    pending_function_calls: &mut HashMap<String, PendingFunctionCall>,
+) -> Option<PendingFunctionCall> {
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return None;
+    }
+    let item_id = item.get("id").and_then(Value::as_str)?;
+    let id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or(item_id)
+        .to_string();
+    let name = item.get("name").and_then(Value::as_str)?.to_string();
+    let arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let call = PendingFunctionCall {
+        id,
+        name,
+        arguments,
+    };
+    pending_function_calls.insert(item_id.to_string(), call.clone());
+    Some(call)
+}
+
+fn emit_function_call(
+    app: &AppHandle,
+    handle: &CodexDirectTurnHandle,
+    call: &PendingFunctionCall,
+    emitted_tool_calls: &mut HashSet<String>,
+) {
+    if !emitted_tool_calls.insert(call.id.clone()) {
+        return;
+    }
+    let input = serde_json::from_str(&call.arguments)
+        .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+    emit_tool_call(
+        app,
+        handle,
+        CodexDirectToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input,
+        },
+    );
 }
 
 fn emit_turn_delta(
@@ -838,6 +1016,20 @@ fn emit_turn_delta(
     content: String,
     reasoning: Option<String>,
 ) {
+    emit_delta(app, handle, content, reasoning, None);
+}
+
+fn emit_tool_call(app: &AppHandle, handle: &CodexDirectTurnHandle, tool_call: CodexDirectToolCall) {
+    emit_delta(app, handle, String::new(), None, Some(tool_call));
+}
+
+fn emit_delta(
+    app: &AppHandle,
+    handle: &CodexDirectTurnHandle,
+    content: String,
+    reasoning: Option<String>,
+    tool_call: Option<CodexDirectToolCall>,
+) {
     let _ = app.emit(
         "codex-direct-turn-delta",
         CodexDirectTurnDelta {
@@ -845,6 +1037,7 @@ fn emit_turn_delta(
             turn_id: handle.turn_id.clone(),
             content,
             reasoning,
+            tool_call,
         },
     );
 }
@@ -868,12 +1061,24 @@ fn emit_turn_completed(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_turn_body, parse_sse_line, wire_reasoning_effort};
+    use super::{
+        build_turn_body, normalize_tool_choice, normalize_tools, parse_sse_line,
+        wire_reasoning_effort,
+    };
     use serde_json::json;
 
     #[test]
     fn builds_conservative_codex_responses_body() {
-        let body = build_turn_body("gpt-5.6-terra", "system", "hello", "high", None);
+        let body = build_turn_body(
+            "gpt-5.6-terra",
+            "system",
+            "hello",
+            "high",
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(body["model"], "gpt-5.6-terra");
         assert_eq!(body["stream"], true);
         assert_eq!(body["reasoning"]["effort"], "high");
@@ -890,6 +1095,9 @@ mod tests {
             "hello",
             "none",
             Some(json!({ "type": "object" })),
+            None,
+            None,
+            None,
         );
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["include"], json!([]));
@@ -908,5 +1116,31 @@ mod tests {
         assert_eq!(wire_reasoning_effort("minimal"), Some("low"));
         assert_eq!(wire_reasoning_effort("xhigh"), Some("high"));
         assert_eq!(wire_reasoning_effort("none"), None);
+    }
+
+    #[test]
+    fn converts_ai_sdk_function_tools_to_responses_tools() {
+        let tools = normalize_tools(Some(json!([{
+            "type": "function",
+            "name": "lookup",
+            "description": "Look something up",
+            "inputSchema": { "type": "object" }
+        }])))
+        .expect("function tool should be retained");
+        assert_eq!(tools[0]["parameters"]["type"], "object");
+        assert_eq!(tools[0]["strict"], false);
+        assert!(tools[0].get("inputSchema").is_none());
+    }
+
+    #[test]
+    fn converts_ai_sdk_tool_choice_to_responses_tool_choice() {
+        assert_eq!(
+            normalize_tool_choice(Some(json!({ "type": "auto" }))),
+            Some(json!("auto"))
+        );
+        assert_eq!(
+            normalize_tool_choice(Some(json!({ "type": "tool", "toolName": "lookup" }))),
+            Some(json!({ "type": "function", "name": "lookup" }))
+        );
     }
 }
