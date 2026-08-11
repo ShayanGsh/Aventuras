@@ -12,6 +12,8 @@
  */
 
 import { streamNarrative, generateNarrative } from '../sdk/generate'
+import { codexService } from '$lib/services/codex'
+import { settings } from '$lib/stores/settings.svelte'
 import { ContextBuilder } from '$lib/services/context'
 import { formatLengthInstruction } from '$lib/services/prompts/templates'
 import { StyleReviewerService } from './StyleReviewerService'
@@ -299,12 +301,29 @@ export class NarrativeService {
     const mode = story?.mode ?? 'adventure'
     const inlineImageMode = story?.settings?.imageGenerationMode === 'inline'
     const userPrompt = this.buildUserPrompt(entries, mode, inlineImageMode)
+    const prompt = `${primingMessage}\n\n${userPrompt}`
 
     try {
+      const mainProfile = settings.getMainNarrativeProfile()
+      if (mainProfile?.providerType === 'openai-codex') {
+        for await (const part of codexService.streamTurn({
+          model: settings.apiSettings.defaultModel,
+          system: systemPrompt,
+          prompt,
+          reasoningEffort: settings.apiSettings.reasoningEffort,
+          signal,
+        })) {
+          if (part.reasoning) yield { content: '', reasoning: part.reasoning, done: false }
+          if (part.content) yield { content: part.content, done: false }
+        }
+        yield { content: '', done: true }
+        return
+      }
+
       // Stream using the main narrative profile
       const stream = streamNarrative({
         system: systemPrompt,
-        prompt: `${primingMessage}\n\n${userPrompt}`,
+        prompt,
         signal,
       })
 
@@ -357,10 +376,22 @@ export class NarrativeService {
     const mode = story?.mode ?? 'adventure'
     const inlineImageMode = story?.settings?.imageGenerationMode === 'inline'
     const userPrompt = this.buildUserPrompt(entries, mode, inlineImageMode)
+    const prompt = `${primingMessage}\n\n${userPrompt}`
+
+    const mainProfile = settings.getMainNarrativeProfile()
+    if (mainProfile?.providerType === 'openai-codex') {
+      return codexService.generateText({
+        model: settings.apiSettings.defaultModel,
+        system: systemPrompt,
+        prompt,
+        reasoningEffort: settings.apiSettings.reasoningEffort,
+        signal,
+      })
+    }
 
     return generateNarrative({
       system: systemPrompt,
-      prompt: `${primingMessage}\n\n${userPrompt}`,
+      prompt,
       signal,
     })
   }

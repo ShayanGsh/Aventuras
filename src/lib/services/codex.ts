@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 
 export interface CodexAccount {
   authMode: string
@@ -35,6 +36,42 @@ export interface CodexModel {
   isDefault: boolean
 }
 
+export interface CodexTurnHandle {
+  threadId: string
+  turnId: string
+}
+
+export interface CodexTurnDelta {
+  threadId: string
+  turnId: string
+  content: string
+  reasoning: string | null
+}
+
+export interface CodexTurnCompleted {
+  threadId: string
+  turnId: string
+  status: string
+  error: string | null
+}
+
+export interface CodexTurnRequest {
+  model: string
+  system: string
+  prompt: string
+  reasoningEffort: string
+  signal?: AbortSignal
+}
+
+type CodexTurnStreamEvent =
+  { type: 'delta'; payload: CodexTurnDelta } | { type: 'completed'; payload: CodexTurnCompleted }
+
+function createAbortError(): Error {
+  const error = new Error('Codex turn interrupted')
+  error.name = 'AbortError'
+  return error
+}
+
 class CodexService {
   async readAccount(): Promise<CodexAccountState> {
     return invoke('codex_account_read')
@@ -54,6 +91,128 @@ class CodexService {
 
   async disconnect(): Promise<void> {
     return invoke('codex_disconnect')
+  }
+
+  async startTurn(request: CodexTurnRequest): Promise<CodexTurnHandle> {
+    return invoke('codex_turn_start', {
+      model: request.model,
+      system: request.system,
+      prompt: request.prompt,
+      reasoningEffort: request.reasoningEffort,
+    })
+  }
+
+  async interruptTurn(handle: CodexTurnHandle): Promise<void> {
+    return invoke('codex_turn_interrupt', {
+      threadId: handle.threadId,
+      turnId: handle.turnId,
+    })
+  }
+
+  async generateText(request: CodexTurnRequest): Promise<string> {
+    let content = ''
+    for await (const delta of this.streamTurn(request)) {
+      content += delta.content
+    }
+    return content
+  }
+
+  async *streamTurn(request: CodexTurnRequest): AsyncIterable<CodexTurnDelta> {
+    if (request.signal?.aborted) throw createAbortError()
+
+    const buffered: CodexTurnStreamEvent[] = []
+    const queued: CodexTurnStreamEvent[] = []
+    let handle: CodexTurnHandle | null = null
+    let closed = false
+    let wake: ((event: CodexTurnStreamEvent | null) => void) | null = null
+
+    const push = (event: CodexTurnStreamEvent) => {
+      if (closed) return
+      if (wake) {
+        const resolve = wake
+        wake = null
+        resolve(event)
+      } else {
+        queued.push(event)
+      }
+    }
+
+    const accept = (event: CodexTurnStreamEvent) => {
+      if (!handle) {
+        buffered.push(event)
+        return
+      }
+      const payload = event.payload
+      if (payload.threadId === handle.threadId && payload.turnId === handle.turnId) {
+        push(event)
+      }
+    }
+
+    const take = async (): Promise<CodexTurnStreamEvent | null> => {
+      if (queued.length > 0) return queued.shift() ?? null
+      if (closed) return null
+      return new Promise((resolve) => {
+        wake = resolve
+      })
+    }
+
+    let unlistenDelta: (() => void) | undefined
+    let unlistenCompleted: (() => void) | undefined
+    let abortHandler: (() => void) | undefined
+
+    try {
+      unlistenDelta = await listen<CodexTurnDelta>('codex-turn-delta', (event) => {
+        accept({ type: 'delta', payload: event.payload })
+      })
+      unlistenCompleted = await listen<CodexTurnCompleted>('codex-turn-completed', (event) => {
+        accept({ type: 'completed', payload: event.payload })
+      })
+
+      handle = await this.startTurn(request)
+      for (const event of buffered.splice(0)) accept(event)
+
+      if (request.signal) {
+        abortHandler = () => {
+          if (handle) void this.interruptTurn(handle).catch(() => undefined)
+          push({
+            type: 'completed',
+            payload: {
+              threadId: handle?.threadId ?? '',
+              turnId: handle?.turnId ?? '',
+              status: 'interrupted',
+              error: null,
+            },
+          })
+        }
+        request.signal.addEventListener('abort', abortHandler, { once: true })
+        if (request.signal.aborted) abortHandler()
+      }
+
+      while (true) {
+        const event = await take()
+        if (!event) return
+        if (event.type === 'delta') {
+          yield event.payload
+          continue
+        }
+
+        if (event.payload.status === 'completed') return
+        if (event.payload.status === 'interrupted') throw createAbortError()
+        throw new Error(event.payload.error || `Codex turn ${event.payload.status}`)
+      }
+    } finally {
+      closed = true
+      if (request.signal && abortHandler) {
+        request.signal.removeEventListener('abort', abortHandler)
+      }
+      unlistenDelta?.()
+      unlistenCompleted?.()
+      if (wake) {
+        const resolve = wake
+        wake = null
+        resolve(null)
+      }
+    }
   }
 }
 
