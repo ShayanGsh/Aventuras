@@ -58,13 +58,33 @@ function mergeProfileModels(fetchedModels: TextModel[], customModels: string[]):
   return dedupeTextModels([...fetchedModels, ...dedupeModelIds(customModels).map((id) => ({ id }))])
 }
 
+function migrateLegacyCodexProfile(profile: APIProfile): APIProfile {
+  const providerType = profile.providerType as string
+  const hasKnownProvider = Object.prototype.hasOwnProperty.call(PROVIDERS, providerType)
+  const hasCredentials = !!profile.apiKey?.trim() || !!profile.baseUrl?.trim()
+  const hasModels =
+    (profile.fetchedModels?.length ?? 0) > 0 || (profile.customModels?.length ?? 0) > 0
+
+  if (!hasKnownProvider && !hasCredentials && hasModels) {
+    return {
+      ...profile,
+      name: PROVIDERS['openai-codex-direct'].name,
+      providerType: 'openai-codex-direct',
+    }
+  }
+
+  return profile
+}
+
 function normalizeProfile(profile: APIProfile): APIProfile {
+  const migrated = migrateLegacyCodexProfile(profile)
+
   return {
-    ...profile,
-    customModels: dedupeModelIds(profile.customModels ?? []),
-    fetchedModels: dedupeTextModels(profile.fetchedModels ?? []),
-    hiddenModels: dedupeModelIds(profile.hiddenModels ?? []),
-    favoriteModels: dedupeModelIds(profile.favoriteModels ?? []),
+    ...migrated,
+    customModels: dedupeModelIds(migrated.customModels ?? []),
+    fetchedModels: dedupeTextModels(migrated.fetchedModels ?? []),
+    hiddenModels: dedupeModelIds(migrated.hiddenModels ?? []),
+    favoriteModels: dedupeModelIds(migrated.favoriteModels ?? []),
   }
 }
 
