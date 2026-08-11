@@ -328,6 +328,22 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
     // No API key or service defaults are stored in Aventuras.
   },
 
+  'openai-codex-hermes': {
+    name: 'OpenAI Codex-Hermes',
+    description: 'Use ChatGPT sign-in with direct Codex HTTP access',
+    baseUrl: '',
+    requiresApiKey: false,
+    capabilities: {
+      textGeneration: true,
+      imageGeneration: false,
+      structuredOutput: false,
+      reasoning: true,
+      modelCapabilityFetching: true,
+    },
+    // Authentication and generation use Aventuras' own Hermes-style OAuth
+    // transport rather than the installed Codex CLI.
+  },
+
   openai: {
     name: 'OpenAI',
     description: 'GPT models from OpenAI',

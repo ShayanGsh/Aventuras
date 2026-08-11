@@ -67,6 +67,7 @@ const PROVIDER_OPTIONS_KEY: Record<ProviderType, string> = {
   'nvidia-nim': 'nvidiaNim',
   'openai-compatible': 'openaiCompatible',
   'openai-codex': 'openaiCodex',
+  'openai-codex-hermes': 'openaiCodexHermes',
   openai: 'openai',
   anthropic: 'anthropic',
   google: 'google',
@@ -131,6 +132,9 @@ export function buildProviderOptions(
         break
       case 'openai-codex':
         // Codex turns receive reasoning effort through the native App Server params.
+        break
+      case 'openai-codex-hermes':
+        // Direct Codex turns receive reasoning effort through the native transport params.
         break
       case 'pollinations':
         options = {
