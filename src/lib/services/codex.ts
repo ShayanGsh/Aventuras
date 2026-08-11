@@ -154,11 +154,9 @@ class CodexService {
       model: request.model,
       system: request.system,
       prompt: request.prompt,
-      input: request.input ?? null,
       reasoningEffort: request.reasoningEffort,
       outputSchema: request.outputSchema ?? null,
       tools: request.tools ?? null,
-      toolChoice: request.toolChoice ?? null,
     })
   }
 

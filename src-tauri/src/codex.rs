@@ -558,7 +558,6 @@ pub async fn codex_turn_start(
     reasoning_effort: String,
     output_schema: Option<Value>,
     tools: Option<Value>,
-    _tool_choice: Option<Value>,
 ) -> Result<CodexTurnHandle, String> {
     let connection = state.connection().await?;
     let mut thread_params = json!({
