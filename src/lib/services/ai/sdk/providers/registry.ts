@@ -20,6 +20,7 @@ import type { APIProfile } from '$lib/types'
 import { createTimeoutFetch } from './fetch'
 import { PROVIDERS, getBaseUrl } from './config'
 import { settings } from '$lib/stores/settings.svelte'
+import { createCodexLanguageModel } from './codexModel'
 
 export function createModelFromProfile(options: {
   profile: APIProfile
@@ -151,14 +152,10 @@ function createProviderFromProfile(options: {
       })
 
     case 'openai-codex':
-      throw new Error(
-        'OpenAI Codex profiles use the Codex App Server and are not Vercel AI SDK providers',
-      )
+      return (modelId: string) => createCodexLanguageModel('openai-codex', modelId)
 
     case 'openai-codex-direct':
-      throw new Error(
-        'OpenAI Codex direct profiles use the direct OAuth transport and are not Vercel AI SDK providers',
-      )
+      return (modelId: string) => createCodexLanguageModel('openai-codex-direct', modelId)
 
     case 'xai':
       return createXai({ apiKey: profile.apiKey, baseURL, fetch })

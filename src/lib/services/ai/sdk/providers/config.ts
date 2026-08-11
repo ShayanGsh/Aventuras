@@ -33,6 +33,13 @@ export interface ProviderCapabilities {
    */
   reasoningExtraction?: 'think-tag'
   modelCapabilityFetching?: boolean
+  toolCalling?: boolean
+}
+
+export const CODEX_PROVIDER_TYPES = ['openai-codex', 'openai-codex-direct'] as const
+
+export function isNativeCodexProvider(providerType: ProviderType): boolean {
+  return (CODEX_PROVIDER_TYPES as readonly string[]).includes(providerType)
 }
 
 export interface ProviderServices {
@@ -322,6 +329,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       structuredOutput: false,
       reasoning: true,
       modelCapabilityFetching: true,
+      toolCalling: false,
     },
     // Authentication and generation use the native Codex App Server exposed by
     // the installed Codex CLI.
@@ -339,6 +347,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       structuredOutput: false,
       reasoning: true,
       modelCapabilityFetching: true,
+      toolCalling: false,
     },
     // Authentication and generation use Aventuras' own direct OAuth
     // transport rather than the installed Codex CLI.

@@ -57,6 +57,12 @@ function resolveAgentConfig(
     throw new Error(`Profile not found: ${profileId}`)
   }
 
+  if (PROVIDERS[profile.providerType].capabilities.toolCalling === false) {
+    throw new Error(
+      'OpenAI Codex profiles do not support Aventuras tool-loop services. Assign a tool-capable provider to this service.',
+    )
+  }
+
   const fetchedModel = settings.getProfileModels(profileId).find((m) => m.id === preset.model)
 
   let structuredOutputs = false
