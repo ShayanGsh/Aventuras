@@ -232,10 +232,11 @@
   <!-- API Key -->
   {#if providerType === 'openai-codex'}
     <div class="space-y-2">
-      <Label>ChatGPT account</Label>
+      <Label>ChatGPT account (Codex CLI)</Label>
       <div class="bg-muted/30 space-y-2 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">
-          Sign in through Codex. Aventuras never stores your ChatGPT credentials or OAuth token.
+          Sign in through the installed Codex CLI. Aventuras delegates authentication and model
+          access to it.
         </p>
         {#if codexAccount}
           <div class="text-sm">
@@ -256,7 +257,7 @@
           </div>
         {:else}
           <Button size="sm" onclick={onCodexLogin} disabled={isCodexLoggingIn}>
-            {isCodexLoggingIn ? 'Opening sign-in...' : 'Sign in with ChatGPT'}
+            {isCodexLoggingIn ? 'Opening sign-in...' : 'Sign in with ChatGPT via Codex CLI'}
           </Button>
         {/if}
         {#if isCodexLoggingIn}
