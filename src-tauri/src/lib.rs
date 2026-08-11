@@ -13,6 +13,7 @@ use backup::{
 };
 use codex::{
     codex_account_read, codex_disconnect, codex_list_models, codex_login_start, codex_logout,
+    codex_turn_interrupt, codex_turn_start,
 };
 use sync::commands::{
     clear_received_stories, get_received_stories, start_sync_server, stop_sync_server,
@@ -285,6 +286,8 @@ pub fn run() {
             codex_logout,
             codex_list_models,
             codex_disconnect,
+            codex_turn_start,
+            codex_turn_interrupt,
             start_sync_server,
             stop_sync_server,
             get_received_stories,

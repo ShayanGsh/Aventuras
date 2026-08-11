@@ -88,6 +88,59 @@ struct CodexLoginCompleted {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexTurnHandle {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexTurnDelta {
+    thread_id: String,
+    turn_id: String,
+    content: String,
+    reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexTurnCompleted {
+    thread_id: String,
+    turn_id: String,
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexThreadStartResponse {
+    thread: CodexThreadReference,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexThreadReference {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTurnStartResponse {
+    turn: CodexTurnReference,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTurnReference {
+    id: String,
+    status: String,
+    #[serde(default)]
+    error: Option<CodexTurnError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTurnError {
+    message: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcErrorPayload {
     code: i64,
@@ -455,6 +508,101 @@ pub async fn codex_list_models(state: State<'_, CodexState>) -> Result<Vec<Codex
 }
 
 #[tauri::command]
+pub async fn codex_turn_start(
+    app: AppHandle,
+    state: State<'_, CodexState>,
+    model: String,
+    system: String,
+    prompt: String,
+    reasoning_effort: String,
+) -> Result<CodexTurnHandle, String> {
+    let connection = state.connection().await?;
+    let thread_response = connection
+        .request(
+            "thread/start",
+            json!({
+                "model": model,
+                "ephemeral": true,
+                "baseInstructions": system,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "serviceName": "aventuras"
+            }),
+        )
+        .await?;
+    let thread: CodexThreadStartResponse = serde_json::from_value(thread_response)
+        .map_err(|error| format!("Codex returned an invalid thread response: {error}"))?;
+
+    let notifications = connection.subscribe();
+    let turn_response = connection
+        .request(
+            "turn/start",
+            json!({
+                "threadId": thread.thread.id,
+                "model": model,
+                "effort": reasoning_effort,
+                "approvalPolicy": "never",
+                "sandboxPolicy": {
+                    "type": "readOnly",
+                    "networkAccess": false
+                },
+                "input": [{
+                    "type": "text",
+                    "text": prompt
+                }]
+            }),
+        )
+        .await?;
+    let turn: CodexTurnStartResponse = serde_json::from_value(turn_response)
+        .map_err(|error| format!("Codex returned an invalid turn response: {error}"))?;
+
+    let handle = CodexTurnHandle {
+        thread_id: thread.thread.id,
+        turn_id: turn.turn.id,
+    };
+
+    if turn.turn.status == "inProgress" {
+        let app = app.clone();
+        let thread_id = handle.thread_id.clone();
+        let turn_id = handle.turn_id.clone();
+        tauri::async_runtime::spawn(async move {
+            monitor_turn(app, notifications, thread_id, turn_id).await;
+        });
+    } else {
+        emit_turn_completed(
+            &app,
+            CodexTurnCompleted {
+                thread_id: handle.thread_id.clone(),
+                turn_id: handle.turn_id.clone(),
+                status: turn.turn.status,
+                error: turn.turn.error.map(|error| error.message),
+            },
+        );
+    }
+
+    Ok(handle)
+}
+
+#[tauri::command]
+pub async fn codex_turn_interrupt(
+    state: State<'_, CodexState>,
+    thread_id: String,
+    turn_id: String,
+) -> Result<(), String> {
+    let connection = state.connection().await?;
+    connection
+        .request(
+            "turn/interrupt",
+            json!({
+                "threadId": thread_id,
+                "turnId": turn_id
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
     state.disconnect().await;
     Ok(())
@@ -466,6 +614,120 @@ fn build_request(id: u64, method: &str, params: Value) -> Value {
 
 fn build_notification(method: &str, params: Value) -> Value {
     json!({ "method": method, "params": params })
+}
+
+async fn monitor_turn(
+    app: AppHandle,
+    mut notifications: broadcast::Receiver<CodexNotification>,
+    thread_id: String,
+    turn_id: String,
+) {
+    loop {
+        let notification = match notifications.recv().await {
+            Ok(notification) => notification,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => {
+                emit_turn_completed(
+                    &app,
+                    CodexTurnCompleted {
+                        thread_id,
+                        turn_id,
+                        status: "failed".to_string(),
+                        error: Some("Codex app-server closed its notification stream".to_string()),
+                    },
+                );
+                return;
+            }
+        };
+
+        let notification_thread_id = notification.params.get("threadId").and_then(Value::as_str);
+        if notification_thread_id != Some(thread_id.as_str()) {
+            continue;
+        }
+
+        match notification.method.as_str() {
+            "item/agentMessage/delta" => {
+                if notification.params.get("turnId").and_then(Value::as_str)
+                    != Some(turn_id.as_str())
+                {
+                    continue;
+                }
+                if let Some(delta) = notification.params.get("delta").and_then(Value::as_str) {
+                    emit_turn_delta(
+                        &app,
+                        CodexTurnDelta {
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            content: delta.to_string(),
+                            reasoning: None,
+                        },
+                    );
+                }
+            }
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                if notification.params.get("turnId").and_then(Value::as_str)
+                    != Some(turn_id.as_str())
+                {
+                    continue;
+                }
+                if let Some(delta) = notification.params.get("delta").and_then(Value::as_str) {
+                    emit_turn_delta(
+                        &app,
+                        CodexTurnDelta {
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            content: String::new(),
+                            reasoning: Some(delta.to_string()),
+                        },
+                    );
+                }
+            }
+            "turn/completed" => {
+                let completed_turn_id = notification
+                    .params
+                    .get("turn")
+                    .and_then(|turn| turn.get("id"))
+                    .and_then(Value::as_str);
+                if completed_turn_id != Some(turn_id.as_str()) {
+                    continue;
+                }
+                let status = notification
+                    .params
+                    .get("turn")
+                    .and_then(|turn| turn.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed")
+                    .to_string();
+                let error = notification
+                    .params
+                    .get("turn")
+                    .and_then(|turn| turn.get("error"))
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .map(String::from);
+
+                emit_turn_completed(
+                    &app,
+                    CodexTurnCompleted {
+                        thread_id,
+                        turn_id,
+                        status,
+                        error,
+                    },
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_turn_delta(app: &AppHandle, delta: CodexTurnDelta) {
+    let _ = app.emit("codex-turn-delta", delta);
+}
+
+fn emit_turn_completed(app: &AppHandle, completed: CodexTurnCompleted) {
+    let _ = app.emit("codex-turn-completed", completed);
 }
 
 fn spawn_codex_process() -> Result<Child, String> {
