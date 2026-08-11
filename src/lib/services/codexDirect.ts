@@ -65,7 +65,7 @@ type CodexDirectTurnStreamEvent =
   | { type: 'completed'; payload: CodexDirectTurnCompleted }
 
 function createAbortError(): Error {
-  const error = new Error('Codex direct turn interrupted')
+  const error = new Error('Codex turn interrupted')
   error.name = 'AbortError'
   return error
 }
@@ -198,7 +198,7 @@ class CodexDirectService {
 
         if (event.payload.status === 'completed') return
         if (event.payload.status === 'interrupted') throw createAbortError()
-        throw new Error(event.payload.error || `Codex direct turn ${event.payload.status}`)
+        throw new Error(event.payload.error || `Codex turn ${event.payload.status}`)
       }
     } finally {
       closed = true

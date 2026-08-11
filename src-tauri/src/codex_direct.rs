@@ -153,7 +153,7 @@ fn auth_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|path| path.join(AUTH_FILE_NAME))
-        .map_err(|error| format!("Failed to resolve Codex direct auth directory: {error}"))
+        .map_err(|error| format!("Failed to resolve Codex auth directory: {error}"))
 }
 
 fn read_auth(app: &AppHandle) -> Result<Option<StoredCodexAuth>, String> {
@@ -161,11 +161,11 @@ fn read_auth(app: &AppHandle) -> Result<Option<StoredCodexAuth>, String> {
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("Failed to read Codex direct auth: {error}")),
+        Err(error) => return Err(format!("Failed to read Codex auth: {error}")),
     };
 
     let auth = serde_json::from_str(&contents)
-        .map_err(|error| format!("Codex direct auth is invalid: {error}"))?;
+        .map_err(|error| format!("Codex auth is invalid: {error}"))?;
     Ok(Some(auth))
 }
 
@@ -173,19 +173,18 @@ fn save_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<(), String> {
     let path = auth_file_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create Codex direct auth directory: {error}"))?;
+            .map_err(|error| format!("Failed to create Codex auth directory: {error}"))?;
     }
 
     let encoded = serde_json::to_vec_pretty(auth)
-        .map_err(|error| format!("Failed to encode Codex direct auth: {error}"))?;
-    fs::write(&path, encoded)
-        .map_err(|error| format!("Failed to save Codex direct auth: {error}"))?;
+        .map_err(|error| format!("Failed to encode Codex auth: {error}"))?;
+    fs::write(&path, encoded).map_err(|error| format!("Failed to save Codex auth: {error}"))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Failed to protect Codex direct auth: {error}"))?;
+            .map_err(|error| format!("Failed to protect Codex auth: {error}"))?;
     }
 
     Ok(())
@@ -196,7 +195,7 @@ fn delete_auth(app: &AppHandle) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove Codex direct auth: {error}")),
+        Err(error) => Err(format!("Failed to remove Codex auth: {error}")),
     }
 }
 
@@ -237,7 +236,7 @@ fn http_client() -> Result<reqwest::Client, String> {
         .timeout(REQUEST_TIMEOUT)
         .user_agent(CODEX_USER_AGENT)
         .build()
-        .map_err(|error| format!("Failed to create Codex direct HTTP client: {error}"))
+        .map_err(|error| format!("Failed to create Codex HTTP client: {error}"))
 }
 
 async fn response_error(context: &str, response: reqwest::Response) -> String {
@@ -259,7 +258,7 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
         .refresh_token
         .as_deref()
         .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| "Codex direct sign-in has expired. Please sign in again.".to_string())?;
+        .ok_or_else(|| "Codex sign-in has expired. Please sign in again.".to_string())?;
     let client = http_client()?;
     let response = client
         .post(OAUTH_TOKEN_URL)
@@ -271,16 +270,16 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
         ])
         .send()
         .await
-        .map_err(|error| format!("Failed to refresh Codex direct sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to refresh Codex sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex direct sign-in refresh failed", response).await);
+        return Err(response_error("Codex sign-in refresh failed", response).await);
     }
 
     let token_response: OAuthTokenResponse = response
         .json()
         .await
-        .map_err(|error| format!("Codex direct returned an invalid refresh response: {error}"))?;
+        .map_err(|error| format!("Codex returned an invalid refresh response: {error}"))?;
     let expires_at = token_response
         .expires_in
         .map(|expires_in| unix_now() + expires_in)
@@ -300,11 +299,11 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
 
 async fn resolve_auth(app: &AppHandle) -> Result<StoredCodexAuth, String> {
     let mut auth = read_auth(app)?.ok_or_else(|| {
-        "No Codex direct sign-in found. Sign in with ChatGPT to use this provider.".to_string()
+        "No Codex sign-in found. Sign in with ChatGPT to use this provider.".to_string()
     })?;
 
     if auth.access_token.trim().is_empty() {
-        return Err("Codex direct sign-in has no access token. Please sign in again.".to_string());
+        return Err("Codex sign-in has no access token. Please sign in again.".to_string());
     }
 
     if token_needs_refresh(&auth) {
@@ -363,20 +362,20 @@ pub async fn codex_direct_login_start(app: AppHandle) -> Result<CodexDirectLogin
         .json(&json!({ "client_id": OAUTH_CLIENT_ID }))
         .send()
         .await
-        .map_err(|error| format!("Failed to request Codex direct sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to request Codex sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex direct sign-in request failed", response).await);
+        return Err(response_error("Codex sign-in request failed", response).await);
     }
 
     let body = response
         .text()
         .await
-        .map_err(|error| format!("Failed to read Codex direct sign-in response: {error}"))?;
+        .map_err(|error| format!("Failed to read Codex sign-in response: {error}"))?;
     let device: DeviceCodeResponse = serde_json::from_str(&body)
-        .map_err(|error| format!("Codex direct returned an invalid device code: {error}"))?;
+        .map_err(|error| format!("Codex returned an invalid device code: {error}"))?;
     if device.user_code.trim().is_empty() || device.device_auth_id.trim().is_empty() {
-        return Err("Codex direct sign-in response was missing the device code.".to_string());
+        return Err("Codex sign-in response was missing the device code.".to_string());
     }
 
     let login = CodexDirectLoginStart {
@@ -426,7 +425,7 @@ async fn complete_device_login(
     let started = Instant::now();
     let device_token = loop {
         if started.elapsed() >= LOGIN_TIMEOUT {
-            return Err("Codex direct sign-in timed out. Please try again.".to_string());
+            return Err("Codex sign-in timed out. Please try again.".to_string());
         }
         sleep(Duration::from_secs(interval_seconds)).await;
         let response = client
@@ -438,20 +437,21 @@ async fn complete_device_login(
             }))
             .send()
             .await
-            .map_err(|error| format!("Failed while waiting for Codex direct sign-in: {error}"))?;
+            .map_err(|error| format!("Failed while waiting for Codex sign-in: {error}"))?;
         let status = response.status();
         if status.is_success() {
-            let body = response.text().await.map_err(|error| {
-                format!("Failed to read Codex direct device authorization: {error}")
-            })?;
+            let body = response
+                .text()
+                .await
+                .map_err(|error| format!("Failed to read Codex device authorization: {error}"))?;
             break serde_json::from_str::<DeviceAuthTokenResponse>(&body).map_err(|error| {
-                format!("Codex direct returned an invalid device authorization: {error}")
+                format!("Codex returned an invalid device authorization: {error}")
             })?;
         }
         if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
             continue;
         }
-        return Err(response_error("Codex direct device authorization failed", response).await);
+        return Err(response_error("Codex device authorization failed", response).await);
     };
 
     let response = client
@@ -466,16 +466,16 @@ async fn complete_device_login(
         ])
         .send()
         .await
-        .map_err(|error| format!("Failed to exchange Codex direct sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to exchange Codex sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex direct token exchange failed", response).await);
+        return Err(response_error("Codex token exchange failed", response).await);
     }
 
     let token_response: OAuthTokenResponse = response
         .json()
         .await
-        .map_err(|error| format!("Codex direct returned an invalid token response: {error}"))?;
+        .map_err(|error| format!("Codex returned an invalid token response: {error}"))?;
     let expires_at = token_response
         .expires_in
         .map(|expires_in| unix_now() + expires_in)
@@ -506,19 +506,19 @@ pub async fn codex_direct_list_models(app: AppHandle) -> Result<Vec<CodexDirectM
     )
     .send()
     .await
-    .map_err(|error| format!("Failed to fetch Codex direct models: {error}"))?;
+    .map_err(|error| format!("Failed to fetch Codex models: {error}"))?;
     if !response.status().is_success() {
-        return Err(response_error("Codex direct model discovery failed", response).await);
+        return Err(response_error("Codex model discovery failed", response).await);
     }
 
     let body = response
         .json::<Value>()
         .await
-        .map_err(|error| format!("Codex direct returned an invalid model list: {error}"))?;
+        .map_err(|error| format!("Codex returned an invalid model list: {error}"))?;
     let entries = body
         .get("models")
         .and_then(Value::as_array)
-        .ok_or_else(|| "Codex direct returned a model list without models.".to_string())?;
+        .ok_or_else(|| "Codex returned a model list without models.".to_string())?;
 
     let mut sortable = entries
         .iter()
@@ -682,13 +682,11 @@ async fn run_turn(
     .await
     {
         Ok(response) => response,
-        Err(error) => return TurnResult::Failed(format!("Codex direct request failed: {error}")),
+        Err(error) => return TurnResult::Failed(format!("Codex request failed: {error}")),
     };
 
     if !response.status().is_success() {
-        return TurnResult::Failed(
-            response_error("Codex direct request was rejected", response).await,
-        );
+        return TurnResult::Failed(response_error("Codex request was rejected", response).await);
     }
 
     let mut stream = response.bytes_stream();
@@ -705,9 +703,7 @@ async fn run_turn(
         let Some(chunk) = chunk else { break };
         let chunk = match chunk {
             Ok(chunk) => chunk,
-            Err(error) => {
-                return TurnResult::Failed(format!("Codex direct stream failed: {error}"))
-            }
+            Err(error) => return TurnResult::Failed(format!("Codex stream failed: {error}")),
         };
         buffer.extend_from_slice(&chunk);
 
@@ -752,7 +748,7 @@ async fn run_turn(
     if emitted_text || !emitted_tool_calls.is_empty() {
         TurnResult::Completed
     } else {
-        TurnResult::Failed("Codex direct stream ended without a response.".to_string())
+        TurnResult::Failed("Codex stream ended without a response.".to_string())
     }
 }
 
@@ -870,7 +866,7 @@ fn parse_sse_line(line: &[u8]) -> Option<Result<Value, String>> {
     }
     Some(
         serde_json::from_str(data)
-            .map_err(|error| format!("Codex direct returned invalid stream data: {error}")),
+            .map_err(|error| format!("Codex returned invalid stream data: {error}")),
     )
 }
 
@@ -895,7 +891,7 @@ fn handle_stream_event(
             .get("error")
             .and_then(|value| value.get("message").or(Some(value)))
             .and_then(Value::as_str)
-            .unwrap_or("Codex direct returned an error")
+            .unwrap_or("Codex returned an error")
             .to_string();
         return Some(TurnResult::Failed(error));
     }
@@ -907,7 +903,7 @@ fn handle_stream_event(
             .and_then(Value::as_str)
             .unwrap_or("unknown reason");
         return Some(TurnResult::Failed(format!(
-            "Codex direct response was incomplete: {reason}"
+            "Codex response was incomplete: {reason}"
         )));
     }
 
