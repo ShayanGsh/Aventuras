@@ -155,9 +155,9 @@ function createProviderFromProfile(options: {
         'OpenAI Codex profiles use the Codex App Server and are not Vercel AI SDK providers',
       )
 
-    case 'openai-codex-hermes':
+    case 'openai-codex-direct':
       throw new Error(
-        'OpenAI Codex-Hermes profiles use the direct OAuth transport and are not Vercel AI SDK providers',
+        'OpenAI Codex direct profiles use the direct OAuth transport and are not Vercel AI SDK providers',
       )
 
     case 'xai':

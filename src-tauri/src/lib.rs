@@ -4,7 +4,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod avt_import;
 mod backup;
 mod codex;
-mod codex_hermes;
+mod codex_direct;
 mod migration_patch;
 mod sync;
 
@@ -16,10 +16,10 @@ use codex::{
     codex_account_read, codex_disconnect, codex_list_models, codex_login_start, codex_logout,
     codex_turn_interrupt, codex_turn_start,
 };
-use codex_hermes::{
-    codex_hermes_account_read, codex_hermes_disconnect, codex_hermes_list_models,
-    codex_hermes_login_start, codex_hermes_logout, codex_hermes_turn_interrupt,
-    codex_hermes_turn_start,
+use codex_direct::{
+    codex_direct_account_read, codex_direct_disconnect, codex_direct_list_models,
+    codex_direct_login_start, codex_direct_logout, codex_direct_turn_interrupt,
+    codex_direct_turn_start,
 };
 use sync::commands::{
     clear_received_stories, get_received_stories, start_sync_server, stop_sync_server,
@@ -260,7 +260,7 @@ pub fn run() {
 
     builder
         .manage(codex::CodexState::default())
-        .manage(codex_hermes::CodexHermesState::default())
+        .manage(codex_direct::CodexDirectState::default())
         .manage(sync::SyncState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -295,13 +295,13 @@ pub fn run() {
             codex_disconnect,
             codex_turn_start,
             codex_turn_interrupt,
-            codex_hermes_account_read,
-            codex_hermes_login_start,
-            codex_hermes_logout,
-            codex_hermes_list_models,
-            codex_hermes_disconnect,
-            codex_hermes_turn_start,
-            codex_hermes_turn_interrupt,
+            codex_direct_account_read,
+            codex_direct_login_start,
+            codex_direct_logout,
+            codex_direct_list_models,
+            codex_direct_disconnect,
+            codex_direct_turn_start,
+            codex_direct_turn_interrupt,
             start_sync_server,
             stop_sync_server,
             get_received_stories,

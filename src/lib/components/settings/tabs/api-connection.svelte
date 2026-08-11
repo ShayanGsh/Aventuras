@@ -7,8 +7,8 @@
   import type { APIProfile, ProviderType, TextModel } from '$lib/types'
   import type { CodexAccount } from '$lib/services/codex'
   import { codexService } from '$lib/services/codex'
-  import type { CodexHermesAccount } from '$lib/services/codexHermes'
-  import { codexHermesService } from '$lib/services/codexHermes'
+  import type { CodexDirectAccount } from '$lib/services/codexDirect'
+  import { codexDirectService } from '$lib/services/codexDirect'
   import { fetchModelsFromProvider } from '$lib/services/ai/sdk/providers'
   import { PROVIDERS } from '$lib/services/ai/sdk/providers/config'
   import { pingProfileModels, isPingEligible } from '$lib/services/modelHealthOrchestrator'
@@ -47,12 +47,12 @@
   let isFetchingModels = $state(false)
   let fetchError = $state<string | null>(null)
   let openCollapsibles = $state<Set<string>>(new Set())
-  let codexAccount = $state<CodexAccount | CodexHermesAccount | null>(null)
+  let codexAccount = $state<CodexAccount | CodexDirectAccount | null>(null)
   let isCodexLoggingIn = $state(false)
   let codexError = $state<string | null>(null)
   let codexUserCode = $state<string | null>(null)
   let unlistenCodexLogin: (() => void) | undefined
-  let unlistenCodexHermesLogin: (() => void) | undefined
+  let unlistenCodexDirectLogin: (() => void) | undefined
 
   interface CodexLoginCompleted {
     loginId: string | null
@@ -65,14 +65,14 @@
   }
 
   function isCodexProvider(providerType: ProviderType = formProviderType): boolean {
-    return providerType === 'openai-codex' || providerType === 'openai-codex-hermes'
+    return providerType === 'openai-codex' || providerType === 'openai-codex-direct'
   }
 
   async function loadCodexAccount() {
     try {
       const state =
-        formProviderType === 'openai-codex-hermes'
-          ? await codexHermesService.readAccount()
+        formProviderType === 'openai-codex-direct'
+          ? await codexDirectService.readAccount()
           : await codexService.readAccount()
       codexAccount = state.account
       codexError = null
@@ -89,8 +89,8 @@
 
     try {
       const login =
-        formProviderType === 'openai-codex-hermes'
-          ? await codexHermesService.startLogin()
+        formProviderType === 'openai-codex-direct'
+          ? await codexDirectService.startLogin()
           : await codexService.startLogin()
       codexUserCode = login.userCode || null
       const loginUrl = login.authUrl ?? login.verificationUrl
@@ -107,8 +107,8 @@
   async function handleCodexLogout() {
     codexError = null
     try {
-      if (formProviderType === 'openai-codex-hermes') {
-        await codexHermesService.logout()
+      if (formProviderType === 'openai-codex-direct') {
+        await codexDirectService.logout()
       } else {
         await codexService.logout()
       }
@@ -363,7 +363,7 @@
   onDestroy(() => {
     mounted = false
     unlistenCodexLogin?.()
-    unlistenCodexHermesLogin?.()
+    unlistenCodexDirectLogin?.()
     flushAutoSave()
   })
 
@@ -391,11 +391,11 @@
         // The event bridge is unavailable outside the Tauri runtime.
       })
 
-    void listen<CodexLoginCompleted>('codex-hermes-login-completed', (event) => {
+    void listen<CodexLoginCompleted>('codex-direct-login-completed', (event) => {
       handleCodexLoginCompleted(event.payload)
     })
       .then((unlisten) => {
-        if (mounted) unlistenCodexHermesLogin = unlisten
+        if (mounted) unlistenCodexDirectLogin = unlisten
         else unlisten()
       })
       .catch(() => {

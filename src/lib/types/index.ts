@@ -656,7 +656,7 @@ export type ProviderType =
   | 'nvidia-nim' // @ai-sdk/openai (NVIDIA NIM)
   | 'openai-compatible' // @ai-sdk/openai-compatible (requires custom baseUrl)
   | 'openai-codex' // Codex App Server via the installed Codex CLI (ChatGPT sign-in)
-  | 'openai-codex-hermes' // Direct OAuth-backed Codex Responses transport (ChatGPT sign-in)
+  | 'openai-codex-direct' // Direct OAuth-backed Codex Responses transport (ChatGPT sign-in)
   | 'openai' // @ai-sdk/openai
   | 'anthropic' // @ai-sdk/anthropic
   | 'google' // @ai-sdk/google

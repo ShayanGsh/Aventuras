@@ -9,7 +9,7 @@ import { dedupeTextModels } from '$lib/utils/dedupeTextModels'
 import { createTimeoutFetch } from './fetch'
 import { PROVIDERS, getBaseUrl } from './config'
 import { codexService } from '$lib/services/codex'
-import { codexHermesService } from '$lib/services/codexHermes'
+import { codexDirectService } from '$lib/services/codexDirect'
 
 /** URLs that don't require authentication for model fetching */
 const NO_AUTH_PATTERNS = ['nano-gpt.com', 'gen.pollinations.ai', '127.0.0.1', 'localhost']
@@ -46,7 +46,7 @@ export async function fetchModelsFromProvider(
   if (providerType === 'mistral') return wrap(fetchMistralModels(baseUrl, apiKey))
   if (providerType === 'pollinations') return fetchPollinationsTextModels(apiKey)
   if (providerType === 'openai-codex') return fetchCodexModels()
-  if (providerType === 'openai-codex-hermes') return fetchCodexHermesModels()
+  if (providerType === 'openai-codex-direct') return fetchCodexDirectModels()
 
   if (providerType === 'nvidia-nim') return fetchNimModels(baseUrl, apiKey)
 
@@ -92,8 +92,8 @@ async function fetchCodexModels(): Promise<TextModel[]> {
   )
 }
 
-async function fetchCodexHermesModels(): Promise<TextModel[]> {
-  const models = await codexHermesService.listModels()
+async function fetchCodexDirectModels(): Promise<TextModel[]> {
+  const models = await codexDirectService.listModels()
   return dedupeTextModels(models.map((model) => ({ id: model.id, reasoning: model.reasoning })))
 }
 

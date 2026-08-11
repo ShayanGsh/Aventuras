@@ -13,7 +13,7 @@
 
 import { streamNarrative, generateNarrative } from '../sdk/generate'
 import { codexService } from '$lib/services/codex'
-import { codexHermesService } from '$lib/services/codexHermes'
+import { codexDirectService } from '$lib/services/codexDirect'
 import { settings } from '$lib/stores/settings.svelte'
 import { ContextBuilder } from '$lib/services/context'
 import { formatLengthInstruction } from '$lib/services/prompts/templates'
@@ -309,8 +309,8 @@ export class NarrativeService {
       const codexTransport =
         mainProfile?.providerType === 'openai-codex'
           ? codexService
-          : mainProfile?.providerType === 'openai-codex-hermes'
-            ? codexHermesService
+          : mainProfile?.providerType === 'openai-codex-direct'
+            ? codexDirectService
             : null
       if (codexTransport) {
         for await (const part of codexTransport.streamTurn({
@@ -389,8 +389,8 @@ export class NarrativeService {
     const codexTransport =
       mainProfile?.providerType === 'openai-codex'
         ? codexService
-        : mainProfile?.providerType === 'openai-codex-hermes'
-          ? codexHermesService
+        : mainProfile?.providerType === 'openai-codex-direct'
+          ? codexDirectService
           : null
     if (codexTransport) {
       return codexTransport.generateText({

@@ -20,7 +20,7 @@ const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_DEVICE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const OAUTH_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const OAUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
-const AUTH_FILE_NAME: &str = "codex-hermes-auth.json";
+const AUTH_FILE_NAME: &str = "codex-direct-auth.json";
 const CODEX_USER_AGENT: &str = "codex_cli_rs/0.0.0 (Aventuras)";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 120;
@@ -28,13 +28,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default, Clone)]
-pub struct CodexHermesState {
+pub struct CodexDirectState {
     active_turns: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexHermesAccount {
+pub struct CodexDirectAccount {
     #[serde(rename = "type")]
     pub auth_mode: String,
     pub email: Option<String>,
@@ -43,14 +43,14 @@ pub struct CodexHermesAccount {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexHermesAccountState {
-    pub account: Option<CodexHermesAccount>,
+pub struct CodexDirectAccountState {
+    pub account: Option<CodexDirectAccount>,
     pub requires_openai_auth: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexHermesLoginStart {
+pub struct CodexDirectLoginStart {
     pub login_type: String,
     pub login_id: String,
     pub auth_url: String,
@@ -60,21 +60,21 @@ pub struct CodexHermesLoginStart {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexHermesModel {
+pub struct CodexDirectModel {
     pub id: String,
     pub reasoning: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexHermesTurnHandle {
+pub struct CodexDirectTurnHandle {
     pub thread_id: String,
     pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexHermesTurnDelta {
+struct CodexDirectTurnDelta {
     thread_id: String,
     turn_id: String,
     content: String,
@@ -83,7 +83,7 @@ struct CodexHermesTurnDelta {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexHermesTurnCompleted {
+struct CodexDirectTurnCompleted {
     thread_id: String,
     turn_id: String,
     status: String,
@@ -92,7 +92,7 @@ struct CodexHermesTurnCompleted {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexHermesLoginCompleted {
+struct CodexDirectLoginCompleted {
     login_id: String,
     success: bool,
     error: Option<String>,
@@ -136,7 +136,7 @@ fn auth_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|path| path.join(AUTH_FILE_NAME))
-        .map_err(|error| format!("Failed to resolve Codex-Hermes auth directory: {error}"))
+        .map_err(|error| format!("Failed to resolve Codex direct auth directory: {error}"))
 }
 
 fn read_auth(app: &AppHandle) -> Result<Option<StoredCodexAuth>, String> {
@@ -144,11 +144,11 @@ fn read_auth(app: &AppHandle) -> Result<Option<StoredCodexAuth>, String> {
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("Failed to read Codex-Hermes auth: {error}")),
+        Err(error) => return Err(format!("Failed to read Codex direct auth: {error}")),
     };
 
     let auth = serde_json::from_str(&contents)
-        .map_err(|error| format!("Codex-Hermes auth is invalid: {error}"))?;
+        .map_err(|error| format!("Codex direct auth is invalid: {error}"))?;
     Ok(Some(auth))
 }
 
@@ -156,19 +156,19 @@ fn save_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<(), String> {
     let path = auth_file_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create Codex-Hermes auth directory: {error}"))?;
+            .map_err(|error| format!("Failed to create Codex direct auth directory: {error}"))?;
     }
 
     let encoded = serde_json::to_vec_pretty(auth)
-        .map_err(|error| format!("Failed to encode Codex-Hermes auth: {error}"))?;
+        .map_err(|error| format!("Failed to encode Codex direct auth: {error}"))?;
     fs::write(&path, encoded)
-        .map_err(|error| format!("Failed to save Codex-Hermes auth: {error}"))?;
+        .map_err(|error| format!("Failed to save Codex direct auth: {error}"))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Failed to protect Codex-Hermes auth: {error}"))?;
+            .map_err(|error| format!("Failed to protect Codex direct auth: {error}"))?;
     }
 
     Ok(())
@@ -179,7 +179,7 @@ fn delete_auth(app: &AppHandle) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove Codex-Hermes auth: {error}")),
+        Err(error) => Err(format!("Failed to remove Codex direct auth: {error}")),
     }
 }
 
@@ -220,7 +220,7 @@ fn http_client() -> Result<reqwest::Client, String> {
         .timeout(REQUEST_TIMEOUT)
         .user_agent(CODEX_USER_AGENT)
         .build()
-        .map_err(|error| format!("Failed to create Codex-Hermes HTTP client: {error}"))
+        .map_err(|error| format!("Failed to create Codex direct HTTP client: {error}"))
 }
 
 async fn response_error(context: &str, response: reqwest::Response) -> String {
@@ -242,7 +242,7 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
         .refresh_token
         .as_deref()
         .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| "Codex-Hermes sign-in has expired. Please sign in again.".to_string())?;
+        .ok_or_else(|| "Codex direct sign-in has expired. Please sign in again.".to_string())?;
     let client = http_client()?;
     let response = client
         .post(OAUTH_TOKEN_URL)
@@ -254,16 +254,16 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
         ])
         .send()
         .await
-        .map_err(|error| format!("Failed to refresh Codex-Hermes sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to refresh Codex direct sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex-Hermes sign-in refresh failed", response).await);
+        return Err(response_error("Codex direct sign-in refresh failed", response).await);
     }
 
     let token_response: OAuthTokenResponse = response
         .json()
         .await
-        .map_err(|error| format!("Codex-Hermes returned an invalid refresh response: {error}"))?;
+        .map_err(|error| format!("Codex direct returned an invalid refresh response: {error}"))?;
     let expires_at = token_response
         .expires_in
         .map(|expires_in| unix_now() + expires_in)
@@ -283,11 +283,11 @@ async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredC
 
 async fn resolve_auth(app: &AppHandle) -> Result<StoredCodexAuth, String> {
     let mut auth = read_auth(app)?.ok_or_else(|| {
-        "No Codex-Hermes sign-in found. Sign in with ChatGPT to use this provider.".to_string()
+        "No Codex direct sign-in found. Sign in with ChatGPT to use this provider.".to_string()
     })?;
 
     if auth.access_token.trim().is_empty() {
-        return Err("Codex-Hermes sign-in has no access token. Please sign in again.".to_string());
+        return Err("Codex direct sign-in has no access token. Please sign in again.".to_string());
     }
 
     if token_needs_refresh(&auth) {
@@ -318,17 +318,17 @@ fn apply_codex_headers(
 }
 
 #[tauri::command]
-pub async fn codex_hermes_account_read(app: AppHandle) -> Result<CodexHermesAccountState, String> {
+pub async fn codex_direct_account_read(app: AppHandle) -> Result<CodexDirectAccountState, String> {
     if read_auth(&app)?.is_none() {
-        return Ok(CodexHermesAccountState {
+        return Ok(CodexDirectAccountState {
             account: None,
             requires_openai_auth: true,
         });
     }
 
     let _auth = resolve_auth(&app).await?;
-    Ok(CodexHermesAccountState {
-        account: Some(CodexHermesAccount {
+    Ok(CodexDirectAccountState {
+        account: Some(CodexDirectAccount {
             auth_mode: "chatgpt".to_string(),
             email: None,
             plan_type: None,
@@ -338,7 +338,7 @@ pub async fn codex_hermes_account_read(app: AppHandle) -> Result<CodexHermesAcco
 }
 
 #[tauri::command]
-pub async fn codex_hermes_login_start(app: AppHandle) -> Result<CodexHermesLoginStart, String> {
+pub async fn codex_direct_login_start(app: AppHandle) -> Result<CodexDirectLoginStart, String> {
     let client = http_client()?;
     let response = client
         .post(OAUTH_DEVICE_URL)
@@ -346,23 +346,23 @@ pub async fn codex_hermes_login_start(app: AppHandle) -> Result<CodexHermesLogin
         .json(&json!({ "client_id": OAUTH_CLIENT_ID }))
         .send()
         .await
-        .map_err(|error| format!("Failed to request Codex-Hermes sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to request Codex direct sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex-Hermes sign-in request failed", response).await);
+        return Err(response_error("Codex direct sign-in request failed", response).await);
     }
 
     let body = response
         .text()
         .await
-        .map_err(|error| format!("Failed to read Codex-Hermes sign-in response: {error}"))?;
+        .map_err(|error| format!("Failed to read Codex direct sign-in response: {error}"))?;
     let device: DeviceCodeResponse = serde_json::from_str(&body)
-        .map_err(|error| format!("Codex-Hermes returned an invalid device code: {error}"))?;
+        .map_err(|error| format!("Codex direct returned an invalid device code: {error}"))?;
     if device.user_code.trim().is_empty() || device.device_auth_id.trim().is_empty() {
-        return Err("Codex-Hermes sign-in response was missing the device code.".to_string());
+        return Err("Codex direct sign-in response was missing the device code.".to_string());
     }
 
-    let login = CodexHermesLoginStart {
+    let login = CodexDirectLoginStart {
         login_type: "device_code".to_string(),
         login_id: device.device_auth_id.clone(),
         auth_url: format!("{OAUTH_ISSUER}/codex/device"),
@@ -382,18 +382,18 @@ pub async fn codex_hermes_login_start(app: AppHandle) -> Result<CodexHermesLogin
     tauri::async_runtime::spawn(async move {
         let result = complete_device_login(&app_for_login, &login_id, &user_code, interval).await;
         let event = match result {
-            Ok(()) => CodexHermesLoginCompleted {
+            Ok(()) => CodexDirectLoginCompleted {
                 login_id: login_id.clone(),
                 success: true,
                 error: None,
             },
-            Err(error) => CodexHermesLoginCompleted {
+            Err(error) => CodexDirectLoginCompleted {
                 login_id: login_id.clone(),
                 success: false,
                 error: Some(error),
             },
         };
-        let _ = app_for_login.emit("codex-hermes-login-completed", event);
+        let _ = app_for_login.emit("codex-direct-login-completed", event);
     });
 
     Ok(login)
@@ -409,7 +409,7 @@ async fn complete_device_login(
     let started = Instant::now();
     let device_token = loop {
         if started.elapsed() >= LOGIN_TIMEOUT {
-            return Err("Codex-Hermes sign-in timed out. Please try again.".to_string());
+            return Err("Codex direct sign-in timed out. Please try again.".to_string());
         }
         sleep(Duration::from_secs(interval_seconds)).await;
         let response = client
@@ -421,20 +421,20 @@ async fn complete_device_login(
             }))
             .send()
             .await
-            .map_err(|error| format!("Failed while waiting for Codex-Hermes sign-in: {error}"))?;
+            .map_err(|error| format!("Failed while waiting for Codex direct sign-in: {error}"))?;
         let status = response.status();
         if status.is_success() {
             let body = response.text().await.map_err(|error| {
-                format!("Failed to read Codex-Hermes device authorization: {error}")
+                format!("Failed to read Codex direct device authorization: {error}")
             })?;
             break serde_json::from_str::<DeviceAuthTokenResponse>(&body).map_err(|error| {
-                format!("Codex-Hermes returned an invalid device authorization: {error}")
+                format!("Codex direct returned an invalid device authorization: {error}")
             })?;
         }
         if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
             continue;
         }
-        return Err(response_error("Codex-Hermes device authorization failed", response).await);
+        return Err(response_error("Codex direct device authorization failed", response).await);
     };
 
     let response = client
@@ -449,16 +449,16 @@ async fn complete_device_login(
         ])
         .send()
         .await
-        .map_err(|error| format!("Failed to exchange Codex-Hermes sign-in: {error}"))?;
+        .map_err(|error| format!("Failed to exchange Codex direct sign-in: {error}"))?;
 
     if !response.status().is_success() {
-        return Err(response_error("Codex-Hermes token exchange failed", response).await);
+        return Err(response_error("Codex direct token exchange failed", response).await);
     }
 
     let token_response: OAuthTokenResponse = response
         .json()
         .await
-        .map_err(|error| format!("Codex-Hermes returned an invalid token response: {error}"))?;
+        .map_err(|error| format!("Codex direct returned an invalid token response: {error}"))?;
     let expires_at = token_response
         .expires_in
         .map(|expires_in| unix_now() + expires_in)
@@ -473,12 +473,12 @@ async fn complete_device_login(
 }
 
 #[tauri::command]
-pub async fn codex_hermes_logout(app: AppHandle) -> Result<(), String> {
+pub async fn codex_direct_logout(app: AppHandle) -> Result<(), String> {
     delete_auth(&app)
 }
 
 #[tauri::command]
-pub async fn codex_hermes_list_models(app: AppHandle) -> Result<Vec<CodexHermesModel>, String> {
+pub async fn codex_direct_list_models(app: AppHandle) -> Result<Vec<CodexDirectModel>, String> {
     let auth = resolve_auth(&app).await?;
     let client = http_client()?;
     let response = apply_codex_headers(
@@ -489,19 +489,19 @@ pub async fn codex_hermes_list_models(app: AppHandle) -> Result<Vec<CodexHermesM
     )
     .send()
     .await
-    .map_err(|error| format!("Failed to fetch Codex-Hermes models: {error}"))?;
+    .map_err(|error| format!("Failed to fetch Codex direct models: {error}"))?;
     if !response.status().is_success() {
-        return Err(response_error("Codex-Hermes model discovery failed", response).await);
+        return Err(response_error("Codex direct model discovery failed", response).await);
     }
 
     let body = response
         .json::<Value>()
         .await
-        .map_err(|error| format!("Codex-Hermes returned an invalid model list: {error}"))?;
+        .map_err(|error| format!("Codex direct returned an invalid model list: {error}"))?;
     let entries = body
         .get("models")
         .and_then(Value::as_array)
-        .ok_or_else(|| "Codex-Hermes returned a model list without models.".to_string())?;
+        .ok_or_else(|| "Codex direct returned a model list without models.".to_string())?;
 
     let mut sortable = entries
         .iter()
@@ -532,7 +532,7 @@ pub async fn codex_hermes_list_models(app: AppHandle) -> Result<Vec<CodexHermesM
         .into_iter()
         .filter_map(|(_, id)| {
             if seen.insert(id.clone()) {
-                Some(CodexHermesModel {
+                Some(CodexDirectModel {
                     id,
                     reasoning: true,
                 })
@@ -544,19 +544,19 @@ pub async fn codex_hermes_list_models(app: AppHandle) -> Result<Vec<CodexHermesM
 }
 
 #[tauri::command]
-pub async fn codex_hermes_turn_start(
+pub async fn codex_direct_turn_start(
     app: AppHandle,
-    state: State<'_, CodexHermesState>,
+    state: State<'_, CodexDirectState>,
     model: String,
     system: String,
     prompt: String,
     reasoning_effort: String,
     output_schema: Option<Value>,
-) -> Result<CodexHermesTurnHandle, String> {
+) -> Result<CodexDirectTurnHandle, String> {
     let auth = resolve_auth(&app).await?;
     let turn_id = Uuid::new_v4().to_string();
-    let handle = CodexHermesTurnHandle {
-        thread_id: format!("hermes-{turn_id}"),
+    let handle = CodexDirectTurnHandle {
+        thread_id: format!("direct-{turn_id}"),
         turn_id: turn_id.clone(),
     };
     let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -600,8 +600,8 @@ pub async fn codex_hermes_turn_start(
 }
 
 #[tauri::command]
-pub async fn codex_hermes_turn_interrupt(
-    state: State<'_, CodexHermesState>,
+pub async fn codex_direct_turn_interrupt(
+    state: State<'_, CodexDirectState>,
     turn_id: String,
 ) -> Result<(), String> {
     if let Some(cancel) = state.active_turns.lock().await.remove(&turn_id) {
@@ -611,7 +611,7 @@ pub async fn codex_hermes_turn_interrupt(
 }
 
 #[tauri::command]
-pub async fn codex_hermes_disconnect(state: State<'_, CodexHermesState>) -> Result<(), String> {
+pub async fn codex_direct_disconnect(state: State<'_, CodexDirectState>) -> Result<(), String> {
     let cancels = std::mem::take(&mut *state.active_turns.lock().await);
     for cancel in cancels.into_values() {
         let _ = cancel.send(());
@@ -621,7 +621,7 @@ pub async fn codex_hermes_disconnect(state: State<'_, CodexHermesState>) -> Resu
 
 async fn run_turn(
     app: &AppHandle,
-    handle: &CodexHermesTurnHandle,
+    handle: &CodexDirectTurnHandle,
     auth: StoredCodexAuth,
     model: &str,
     system: &str,
@@ -647,12 +647,12 @@ async fn run_turn(
     .await
     {
         Ok(response) => response,
-        Err(error) => return TurnResult::Failed(format!("Codex-Hermes request failed: {error}")),
+        Err(error) => return TurnResult::Failed(format!("Codex direct request failed: {error}")),
     };
 
     if !response.status().is_success() {
         return TurnResult::Failed(
-            response_error("Codex-Hermes request was rejected", response).await,
+            response_error("Codex direct request was rejected", response).await,
         );
     }
 
@@ -669,7 +669,7 @@ async fn run_turn(
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
-                return TurnResult::Failed(format!("Codex-Hermes stream failed: {error}"))
+                return TurnResult::Failed(format!("Codex direct stream failed: {error}"))
             }
         };
         buffer.extend_from_slice(&chunk);
@@ -703,7 +703,7 @@ async fn run_turn(
     if emitted_text {
         TurnResult::Completed
     } else {
-        TurnResult::Failed("Codex-Hermes stream ended without a response.".to_string())
+        TurnResult::Failed("Codex direct stream ended without a response.".to_string())
     }
 }
 
@@ -774,13 +774,13 @@ fn parse_sse_line(line: &[u8]) -> Option<Result<Value, String>> {
     }
     Some(
         serde_json::from_str(data)
-            .map_err(|error| format!("Codex-Hermes returned invalid stream data: {error}")),
+            .map_err(|error| format!("Codex direct returned invalid stream data: {error}")),
     )
 }
 
 fn handle_stream_event(
     app: &AppHandle,
-    handle: &CodexHermesTurnHandle,
+    handle: &CodexDirectTurnHandle,
     event: &Value,
     emitted_text: &mut bool,
 ) -> Option<TurnResult> {
@@ -797,7 +797,7 @@ fn handle_stream_event(
             .get("error")
             .and_then(|value| value.get("message").or(Some(value)))
             .and_then(Value::as_str)
-            .unwrap_or("Codex-Hermes returned an error")
+            .unwrap_or("Codex direct returned an error")
             .to_string();
         return Some(TurnResult::Failed(error));
     }
@@ -809,7 +809,7 @@ fn handle_stream_event(
             .and_then(Value::as_str)
             .unwrap_or("unknown reason");
         return Some(TurnResult::Failed(format!(
-            "Codex-Hermes response was incomplete: {reason}"
+            "Codex direct response was incomplete: {reason}"
         )));
     }
 
@@ -834,13 +834,13 @@ fn handle_stream_event(
 
 fn emit_turn_delta(
     app: &AppHandle,
-    handle: &CodexHermesTurnHandle,
+    handle: &CodexDirectTurnHandle,
     content: String,
     reasoning: Option<String>,
 ) {
     let _ = app.emit(
-        "codex-hermes-turn-delta",
-        CodexHermesTurnDelta {
+        "codex-direct-turn-delta",
+        CodexDirectTurnDelta {
             thread_id: handle.thread_id.clone(),
             turn_id: handle.turn_id.clone(),
             content,
@@ -851,13 +851,13 @@ fn emit_turn_delta(
 
 fn emit_turn_completed(
     app: &AppHandle,
-    handle: &CodexHermesTurnHandle,
+    handle: &CodexDirectTurnHandle,
     status: String,
     error: Option<String>,
 ) {
     let _ = app.emit(
-        "codex-hermes-turn-completed",
-        CodexHermesTurnCompleted {
+        "codex-direct-turn-completed",
+        CodexDirectTurnCompleted {
             thread_id: handle.thread_id.clone(),
             turn_id: handle.turn_id.clone(),
             status,

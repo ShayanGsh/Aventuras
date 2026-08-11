@@ -1,18 +1,18 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
-export interface CodexHermesAccount {
+export interface CodexDirectAccount {
   authMode: string
   email: string | null
   planType: string | null
 }
 
-export interface CodexHermesAccountState {
-  account: CodexHermesAccount | null
+export interface CodexDirectAccountState {
+  account: CodexDirectAccount | null
   requiresOpenaiAuth: boolean
 }
 
-export interface CodexHermesLoginStart {
+export interface CodexDirectLoginStart {
   loginType: string
   loginId: string
   authUrl: string
@@ -20,31 +20,31 @@ export interface CodexHermesLoginStart {
   userCode: string
 }
 
-export interface CodexHermesModel {
+export interface CodexDirectModel {
   id: string
   reasoning: boolean
 }
 
-export interface CodexHermesTurnHandle {
+export interface CodexDirectTurnHandle {
   threadId: string
   turnId: string
 }
 
-export interface CodexHermesTurnDelta {
+export interface CodexDirectTurnDelta {
   threadId: string
   turnId: string
   content: string
   reasoning: string | null
 }
 
-export interface CodexHermesTurnCompleted {
+export interface CodexDirectTurnCompleted {
   threadId: string
   turnId: string
   status: string
   error: string | null
 }
 
-export interface CodexHermesTurnRequest {
+export interface CodexDirectTurnRequest {
   model: string
   system: string
   prompt: string
@@ -53,39 +53,39 @@ export interface CodexHermesTurnRequest {
   signal?: AbortSignal
 }
 
-type CodexHermesTurnStreamEvent =
-  | { type: 'delta'; payload: CodexHermesTurnDelta }
-  | { type: 'completed'; payload: CodexHermesTurnCompleted }
+type CodexDirectTurnStreamEvent =
+  | { type: 'delta'; payload: CodexDirectTurnDelta }
+  | { type: 'completed'; payload: CodexDirectTurnCompleted }
 
 function createAbortError(): Error {
-  const error = new Error('Codex-Hermes turn interrupted')
+  const error = new Error('Codex direct turn interrupted')
   error.name = 'AbortError'
   return error
 }
 
-class CodexHermesService {
-  async readAccount(): Promise<CodexHermesAccountState> {
-    return invoke('codex_hermes_account_read')
+class CodexDirectService {
+  async readAccount(): Promise<CodexDirectAccountState> {
+    return invoke('codex_direct_account_read')
   }
 
-  async startLogin(): Promise<CodexHermesLoginStart> {
-    return invoke('codex_hermes_login_start')
+  async startLogin(): Promise<CodexDirectLoginStart> {
+    return invoke('codex_direct_login_start')
   }
 
   async logout(): Promise<void> {
-    return invoke('codex_hermes_logout')
+    return invoke('codex_direct_logout')
   }
 
-  async listModels(): Promise<CodexHermesModel[]> {
-    return invoke('codex_hermes_list_models')
+  async listModels(): Promise<CodexDirectModel[]> {
+    return invoke('codex_direct_list_models')
   }
 
   async disconnect(): Promise<void> {
-    return invoke('codex_hermes_disconnect')
+    return invoke('codex_direct_disconnect')
   }
 
-  async startTurn(request: CodexHermesTurnRequest): Promise<CodexHermesTurnHandle> {
-    return invoke('codex_hermes_turn_start', {
+  async startTurn(request: CodexDirectTurnRequest): Promise<CodexDirectTurnHandle> {
+    return invoke('codex_direct_turn_start', {
       model: request.model,
       system: request.system,
       prompt: request.prompt,
@@ -94,11 +94,11 @@ class CodexHermesService {
     })
   }
 
-  async interruptTurn(handle: CodexHermesTurnHandle): Promise<void> {
-    return invoke('codex_hermes_turn_interrupt', { turnId: handle.turnId })
+  async interruptTurn(handle: CodexDirectTurnHandle): Promise<void> {
+    return invoke('codex_direct_turn_interrupt', { turnId: handle.turnId })
   }
 
-  async generateText(request: CodexHermesTurnRequest): Promise<string> {
+  async generateText(request: CodexDirectTurnRequest): Promise<string> {
     let content = ''
     for await (const delta of this.streamTurn(request)) {
       content += delta.content
@@ -106,16 +106,16 @@ class CodexHermesService {
     return content
   }
 
-  async *streamTurn(request: CodexHermesTurnRequest): AsyncIterable<CodexHermesTurnDelta> {
+  async *streamTurn(request: CodexDirectTurnRequest): AsyncIterable<CodexDirectTurnDelta> {
     if (request.signal?.aborted) throw createAbortError()
 
-    const buffered: CodexHermesTurnStreamEvent[] = []
-    const queued: CodexHermesTurnStreamEvent[] = []
-    let handle: CodexHermesTurnHandle | null = null
+    const buffered: CodexDirectTurnStreamEvent[] = []
+    const queued: CodexDirectTurnStreamEvent[] = []
+    let handle: CodexDirectTurnHandle | null = null
     let closed = false
-    let wake: ((event: CodexHermesTurnStreamEvent | null) => void) | null = null
+    let wake: ((event: CodexDirectTurnStreamEvent | null) => void) | null = null
 
-    const push = (event: CodexHermesTurnStreamEvent) => {
+    const push = (event: CodexDirectTurnStreamEvent) => {
       if (closed) return
       if (wake) {
         const resolve = wake
@@ -126,7 +126,7 @@ class CodexHermesService {
       }
     }
 
-    const accept = (event: CodexHermesTurnStreamEvent) => {
+    const accept = (event: CodexDirectTurnStreamEvent) => {
       if (!handle) {
         buffered.push(event)
         return
@@ -137,7 +137,7 @@ class CodexHermesService {
       }
     }
 
-    const take = async (): Promise<CodexHermesTurnStreamEvent | null> => {
+    const take = async (): Promise<CodexDirectTurnStreamEvent | null> => {
       if (queued.length > 0) return queued.shift() ?? null
       if (closed) return null
       return new Promise((resolve) => {
@@ -150,11 +150,11 @@ class CodexHermesService {
     let abortHandler: (() => void) | undefined
 
     try {
-      unlistenDelta = await listen<CodexHermesTurnDelta>('codex-hermes-turn-delta', (event) => {
+      unlistenDelta = await listen<CodexDirectTurnDelta>('codex-direct-turn-delta', (event) => {
         accept({ type: 'delta', payload: event.payload })
       })
-      unlistenCompleted = await listen<CodexHermesTurnCompleted>(
-        'codex-hermes-turn-completed',
+      unlistenCompleted = await listen<CodexDirectTurnCompleted>(
+        'codex-direct-turn-completed',
         (event) => accept({ type: 'completed', payload: event.payload }),
       )
 
@@ -188,7 +188,7 @@ class CodexHermesService {
 
         if (event.payload.status === 'completed') return
         if (event.payload.status === 'interrupted') throw createAbortError()
-        throw new Error(event.payload.error || `Codex-Hermes turn ${event.payload.status}`)
+        throw new Error(event.payload.error || `Codex direct turn ${event.payload.status}`)
       }
     } finally {
       closed = true
@@ -206,4 +206,4 @@ class CodexHermesService {
   }
 }
 
-export const codexHermesService = new CodexHermesService()
+export const codexDirectService = new CodexDirectService()

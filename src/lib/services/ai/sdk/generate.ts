@@ -32,7 +32,7 @@ import { retryOn429Middleware } from './middleware/retryMiddleware'
 import { createModelFromProfile } from './providers'
 import { getReasoningExtraction, GOOGLE_SAFETY_SETTINGS, PROVIDERS } from './providers/config'
 import { codexService } from '$lib/services/codex'
-import { codexHermesService } from '$lib/services/codexHermes'
+import { codexDirectService } from '$lib/services/codexDirect'
 
 const log = createLogger('Generate')
 
@@ -68,7 +68,7 @@ const PROVIDER_OPTIONS_KEY: Record<ProviderType, string> = {
   'nvidia-nim': 'nvidiaNim',
   'openai-compatible': 'openaiCompatible',
   'openai-codex': 'openaiCodex',
-  'openai-codex-hermes': 'openaiCodexHermes',
+  'openai-codex-direct': 'openaiCodexDirect',
   openai: 'openai',
   anthropic: 'anthropic',
   google: 'google',
@@ -134,7 +134,7 @@ export function buildProviderOptions(
       case 'openai-codex':
         // Codex turns receive reasoning effort through the native App Server params.
         break
-      case 'openai-codex-hermes':
+      case 'openai-codex-direct':
         // Direct Codex turns receive reasoning effort through the native transport params.
         break
       case 'pollinations':
@@ -413,9 +413,9 @@ export async function generateStructured<T extends z.ZodType>(
 ): Promise<z.infer<T>> {
   const { presetId, schema, system, prompt, signal } = options
   const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
-  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-hermes') {
+  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-direct') {
     const response = await (
-      profile.providerType === 'openai-codex' ? codexService : codexHermesService
+      profile.providerType === 'openai-codex' ? codexService : codexDirectService
     ).generateText({
       model: selectedPreset.model,
       system,
@@ -474,9 +474,9 @@ export async function generatePlainText(
 ): Promise<string> {
   const { presetId, system, prompt, signal } = options
   const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
-  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-hermes') {
+  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-direct') {
     return (
-      profile.providerType === 'openai-codex' ? codexService : codexHermesService
+      profile.providerType === 'openai-codex' ? codexService : codexDirectService
     ).generateText({
       model: selectedPreset.model,
       system,
@@ -656,10 +656,10 @@ export async function generateNarrative(options: NarrativeGenerateOptions): Prom
   const mainProfile = settings.getMainNarrativeProfile()
   if (
     mainProfile?.providerType === 'openai-codex' ||
-    mainProfile?.providerType === 'openai-codex-hermes'
+    mainProfile?.providerType === 'openai-codex-direct'
   ) {
     return (
-      mainProfile.providerType === 'openai-codex' ? codexService : codexHermesService
+      mainProfile.providerType === 'openai-codex' ? codexService : codexDirectService
     ).generateText({
       model: settings.apiSettings.defaultModel,
       system,
