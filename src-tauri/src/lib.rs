@@ -14,7 +14,7 @@ use backup::{
 };
 use codex::{
     codex_account_read, codex_disconnect, codex_list_models, codex_login_start, codex_logout,
-    codex_turn_interrupt, codex_turn_start,
+    codex_tool_call_respond, codex_turn_interrupt, codex_turn_start,
 };
 use codex_direct::{
     codex_direct_account_read, codex_direct_disconnect, codex_direct_list_models,
@@ -295,6 +295,7 @@ pub fn run() {
             codex_disconnect,
             codex_turn_start,
             codex_turn_interrupt,
+            codex_tool_call_respond,
             codex_direct_account_read,
             codex_direct_login_start,
             codex_direct_logout,

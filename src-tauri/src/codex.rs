@@ -19,6 +19,7 @@ const NOTIFICATION_BUFFER: usize = 256;
 pub struct CodexNotification {
     pub method: String,
     pub params: Value,
+    pub request_id: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +103,31 @@ struct CodexTurnDelta {
     turn_id: String,
     content: String,
     reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call: Option<CodexToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_result: Option<CodexToolResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexToolCall {
+    id: String,
+    name: String,
+    input: Value,
+    provider_executed: bool,
+    dynamic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexToolResult {
+    id: String,
+    name: String,
+    result: Value,
+    is_error: bool,
+    provider_executed: bool,
+    dynamic: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +254,14 @@ impl CodexConnection {
         self.send_message(build_notification(method, params)).await
     }
 
+    pub async fn respond(&self, request_id: Value, result: Value) -> Result<(), String> {
+        self.send_message(json!({
+            "id": request_id,
+            "result": result
+        }))
+        .await
+    }
+
     async fn send_message(&self, message: Value) -> Result<(), String> {
         let mut stdin = self.stdin.lock().await;
         let encoded = serde_json::to_string(&message)
@@ -282,11 +316,15 @@ impl CodexConnection {
                 let _ = self.notification_tx.send(CodexNotification {
                     method: method.to_string(),
                     params,
+                    request_id: message.get("id").cloned(),
                 });
 
-                // The first generation slice does not expose approval or other
-                // server-initiated request UX. Rejecting these explicitly keeps the
-                // app-server from waiting indefinitely if a turn requests one.
+                // Dynamic tool calls are handled by the active turn monitor. Other
+                // server-initiated requests still receive an explicit rejection so
+                // the app-server does not wait indefinitely.
+                if method == "item/tool/call" {
+                    continue;
+                }
                 if let Some(id) = message.get("id") {
                     let _ = self
                         .send_message(json!({
@@ -374,6 +412,9 @@ impl CodexState {
             .request(
                 "initialize",
                 json!({
+                    "capabilities": {
+                        "experimentalApi": true
+                    },
                     "clientInfo": {
                         "name": "aventuras",
                         "title": "Aventuras",
@@ -516,21 +557,22 @@ pub async fn codex_turn_start(
     prompt: String,
     reasoning_effort: String,
     output_schema: Option<Value>,
+    tools: Option<Value>,
+    _tool_choice: Option<Value>,
 ) -> Result<CodexTurnHandle, String> {
     let connection = state.connection().await?;
-    let thread_response = connection
-        .request(
-            "thread/start",
-            json!({
-                "model": model,
-                "ephemeral": true,
-                "baseInstructions": system,
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "serviceName": "aventuras"
-            }),
-        )
-        .await?;
+    let mut thread_params = json!({
+        "model": model,
+        "ephemeral": true,
+        "baseInstructions": system,
+        "approvalPolicy": "never",
+        "sandbox": "read-only",
+        "serviceName": "aventuras"
+    });
+    if let Some(tools) = normalize_dynamic_tools(tools) {
+        thread_params["dynamicTools"] = tools;
+    }
+    let thread_response = connection.request("thread/start", thread_params).await?;
     let thread: CodexThreadStartResponse = serde_json::from_value(thread_response)
         .map_err(|error| format!("Codex returned an invalid thread response: {error}"))?;
 
@@ -604,6 +646,16 @@ pub async fn codex_turn_interrupt(
 }
 
 #[tauri::command]
+pub async fn codex_tool_call_respond(
+    state: State<'_, CodexState>,
+    request_id: Value,
+    result: Value,
+) -> Result<(), String> {
+    let connection = state.connection().await?;
+    connection.respond(request_id, result).await
+}
+
+#[tauri::command]
 pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
     state.disconnect().await;
     Ok(())
@@ -615,6 +667,85 @@ fn build_request(id: u64, method: &str, params: Value) -> Value {
 
 fn build_notification(method: &str, params: Value) -> Value {
     json!({ "method": method, "params": params })
+}
+
+fn normalize_dynamic_tools(tools: Option<Value>) -> Option<Value> {
+    let tools_value = tools?;
+    let tools = tools_value.as_array()?.iter().filter_map(|tool| {
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            return None;
+        }
+
+        let mut tool = tool.clone();
+        if tool.get("inputSchema").is_none() {
+            if let Some(parameters) = tool.get("parameters").cloned() {
+                tool["inputSchema"] = parameters;
+            }
+        }
+        if let Some(object) = tool.as_object_mut() {
+            object.remove("parameters");
+            object.remove("providerExecuted");
+            object.remove("dynamic");
+        }
+        Some(tool)
+    });
+    let tools = tools.collect::<Vec<_>>();
+    (!tools.is_empty()).then_some(Value::Array(tools))
+}
+
+fn dynamic_tool_call(item: &Value) -> Option<CodexToolCall> {
+    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
+        return None;
+    }
+    let id = item
+        .get("id")
+        .or_else(|| item.get("callId"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let name = item
+        .get("tool")
+        .or_else(|| item.get("name"))
+        .and_then(Value::as_str)?
+        .to_string();
+    Some(CodexToolCall {
+        id,
+        name,
+        input: item.get("arguments").cloned().unwrap_or_else(|| json!({})),
+        provider_executed: true,
+        dynamic: true,
+    })
+}
+
+fn dynamic_tool_result(item: &Value) -> Option<CodexToolResult> {
+    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
+        return None;
+    }
+    let id = item
+        .get("id")
+        .or_else(|| item.get("callId"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let name = item
+        .get("tool")
+        .or_else(|| item.get("name"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let status = item.get("status").and_then(Value::as_str);
+    let is_error = status.is_some_and(|status| status != "completed")
+        || item.get("success").and_then(Value::as_bool) == Some(false);
+    let result = item
+        .get("contentItems")
+        .cloned()
+        .or_else(|| item.get("result").cloned())
+        .unwrap_or(Value::Null);
+    Some(CodexToolResult {
+        id,
+        name,
+        result,
+        is_error,
+        provider_executed: true,
+        dynamic: true,
+    })
 }
 
 async fn monitor_turn(
@@ -647,6 +778,62 @@ async fn monitor_turn(
         }
 
         match notification.method.as_str() {
+            "item/tool/call" => {
+                if notification.params.get("turnId").and_then(Value::as_str)
+                    != Some(turn_id.as_str())
+                {
+                    continue;
+                }
+                let Some(request_id) = notification.request_id else {
+                    continue;
+                };
+                let _ = app.emit(
+                    "codex-tool-call",
+                    json!({
+                        "requestId": request_id,
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "callId": notification.params.get("callId"),
+                        "namespace": notification.params.get("namespace"),
+                        "tool": notification.params.get("tool"),
+                        "arguments": notification.params.get("arguments")
+                    }),
+                );
+            }
+            "item/started" => {
+                if let Some(item) = notification.params.get("item") {
+                    if let Some(tool_call) = dynamic_tool_call(item) {
+                        emit_turn_delta(
+                            &app,
+                            CodexTurnDelta {
+                                thread_id: thread_id.clone(),
+                                turn_id: turn_id.clone(),
+                                content: String::new(),
+                                reasoning: None,
+                                tool_call: Some(tool_call),
+                                tool_result: None,
+                            },
+                        );
+                    }
+                }
+            }
+            "item/completed" => {
+                if let Some(item) = notification.params.get("item") {
+                    if let Some(tool_result) = dynamic_tool_result(item) {
+                        emit_turn_delta(
+                            &app,
+                            CodexTurnDelta {
+                                thread_id: thread_id.clone(),
+                                turn_id: turn_id.clone(),
+                                content: String::new(),
+                                reasoning: None,
+                                tool_call: None,
+                                tool_result: Some(tool_result),
+                            },
+                        );
+                    }
+                }
+            }
             "item/agentMessage/delta" => {
                 if notification.params.get("turnId").and_then(Value::as_str)
                     != Some(turn_id.as_str())
@@ -661,6 +848,8 @@ async fn monitor_turn(
                             turn_id: turn_id.clone(),
                             content: delta.to_string(),
                             reasoning: None,
+                            tool_call: None,
+                            tool_result: None,
                         },
                     );
                 }
@@ -679,6 +868,8 @@ async fn monitor_turn(
                             turn_id: turn_id.clone(),
                             content: String::new(),
                             reasoning: Some(delta.to_string()),
+                            tool_call: None,
+                            tool_result: None,
                         },
                     );
                 }
