@@ -32,6 +32,7 @@ import { retryOn429Middleware } from './middleware/retryMiddleware'
 import { createModelFromProfile } from './providers'
 import { getReasoningExtraction, GOOGLE_SAFETY_SETTINGS, PROVIDERS } from './providers/config'
 import { codexService } from '$lib/services/codex'
+import { codexHermesService } from '$lib/services/codexHermes'
 
 const log = createLogger('Generate')
 
@@ -412,8 +413,10 @@ export async function generateStructured<T extends z.ZodType>(
 ): Promise<z.infer<T>> {
   const { presetId, schema, system, prompt, signal } = options
   const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
-  if (profile.providerType === 'openai-codex') {
-    const response = await codexService.generateText({
+  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-hermes') {
+    const response = await (
+      profile.providerType === 'openai-codex' ? codexService : codexHermesService
+    ).generateText({
       model: selectedPreset.model,
       system,
       prompt,
@@ -471,8 +474,10 @@ export async function generatePlainText(
 ): Promise<string> {
   const { presetId, system, prompt, signal } = options
   const { preset: selectedPreset, profile } = resolvePresetProfile(presetId, serviceId)
-  if (profile.providerType === 'openai-codex') {
-    return codexService.generateText({
+  if (profile.providerType === 'openai-codex' || profile.providerType === 'openai-codex-hermes') {
+    return (
+      profile.providerType === 'openai-codex' ? codexService : codexHermesService
+    ).generateText({
       model: selectedPreset.model,
       system,
       prompt,
@@ -649,8 +654,13 @@ export function streamNarrative(options: NarrativeGenerateOptions) {
 export async function generateNarrative(options: NarrativeGenerateOptions): Promise<string> {
   const { system, prompt, signal } = options
   const mainProfile = settings.getMainNarrativeProfile()
-  if (mainProfile?.providerType === 'openai-codex') {
-    return codexService.generateText({
+  if (
+    mainProfile?.providerType === 'openai-codex' ||
+    mainProfile?.providerType === 'openai-codex-hermes'
+  ) {
+    return (
+      mainProfile.providerType === 'openai-codex' ? codexService : codexHermesService
+    ).generateText({
       model: settings.apiSettings.defaultModel,
       system,
       prompt,

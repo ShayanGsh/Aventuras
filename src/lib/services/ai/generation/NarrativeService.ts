@@ -13,6 +13,7 @@
 
 import { streamNarrative, generateNarrative } from '../sdk/generate'
 import { codexService } from '$lib/services/codex'
+import { codexHermesService } from '$lib/services/codexHermes'
 import { settings } from '$lib/stores/settings.svelte'
 import { ContextBuilder } from '$lib/services/context'
 import { formatLengthInstruction } from '$lib/services/prompts/templates'
@@ -305,8 +306,14 @@ export class NarrativeService {
 
     try {
       const mainProfile = settings.getMainNarrativeProfile()
-      if (mainProfile?.providerType === 'openai-codex') {
-        for await (const part of codexService.streamTurn({
+      const codexTransport =
+        mainProfile?.providerType === 'openai-codex'
+          ? codexService
+          : mainProfile?.providerType === 'openai-codex-hermes'
+            ? codexHermesService
+            : null
+      if (codexTransport) {
+        for await (const part of codexTransport.streamTurn({
           model: settings.apiSettings.defaultModel,
           system: systemPrompt,
           prompt,
@@ -379,8 +386,14 @@ export class NarrativeService {
     const prompt = `${primingMessage}\n\n${userPrompt}`
 
     const mainProfile = settings.getMainNarrativeProfile()
-    if (mainProfile?.providerType === 'openai-codex') {
-      return codexService.generateText({
+    const codexTransport =
+      mainProfile?.providerType === 'openai-codex'
+        ? codexService
+        : mainProfile?.providerType === 'openai-codex-hermes'
+          ? codexHermesService
+          : null
+    if (codexTransport) {
+      return codexTransport.generateText({
         model: settings.apiSettings.defaultModel,
         system: systemPrompt,
         prompt,

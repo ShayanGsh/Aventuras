@@ -7,6 +7,8 @@
   import type { APIProfile, ProviderType, TextModel } from '$lib/types'
   import type { CodexAccount } from '$lib/services/codex'
   import { codexService } from '$lib/services/codex'
+  import type { CodexHermesAccount } from '$lib/services/codexHermes'
+  import { codexHermesService } from '$lib/services/codexHermes'
   import { fetchModelsFromProvider } from '$lib/services/ai/sdk/providers'
   import { PROVIDERS } from '$lib/services/ai/sdk/providers/config'
   import { pingProfileModels, isPingEligible } from '$lib/services/modelHealthOrchestrator'
@@ -45,10 +47,12 @@
   let isFetchingModels = $state(false)
   let fetchError = $state<string | null>(null)
   let openCollapsibles = $state<Set<string>>(new Set())
-  let codexAccount = $state<CodexAccount | null>(null)
+  let codexAccount = $state<CodexAccount | CodexHermesAccount | null>(null)
   let isCodexLoggingIn = $state(false)
   let codexError = $state<string | null>(null)
+  let codexUserCode = $state<string | null>(null)
   let unlistenCodexLogin: (() => void) | undefined
+  let unlistenCodexHermesLogin: (() => void) | undefined
 
   interface CodexLoginCompleted {
     loginId: string | null
@@ -60,9 +64,16 @@
     return error instanceof Error ? error.message : String(error)
   }
 
+  function isCodexProvider(providerType: ProviderType = formProviderType): boolean {
+    return providerType === 'openai-codex' || providerType === 'openai-codex-hermes'
+  }
+
   async function loadCodexAccount() {
     try {
-      const state = await codexService.readAccount()
+      const state =
+        formProviderType === 'openai-codex-hermes'
+          ? await codexHermesService.readAccount()
+          : await codexService.readAccount()
       codexAccount = state.account
       codexError = null
     } catch (error) {
@@ -74,9 +85,14 @@
   async function handleCodexLogin() {
     isCodexLoggingIn = true
     codexError = null
+    codexUserCode = null
 
     try {
-      const login = await codexService.startLogin()
+      const login =
+        formProviderType === 'openai-codex-hermes'
+          ? await codexHermesService.startLogin()
+          : await codexService.startLogin()
+      codexUserCode = login.userCode || null
       const loginUrl = login.authUrl ?? login.verificationUrl
       if (!loginUrl) {
         throw new Error('Codex did not return a sign-in URL')
@@ -91,8 +107,13 @@
   async function handleCodexLogout() {
     codexError = null
     try {
-      await codexService.logout()
+      if (formProviderType === 'openai-codex-hermes') {
+        await codexHermesService.logout()
+      } else {
+        await codexService.logout()
+      }
       codexAccount = null
+      codexUserCode = null
       formFetchedModels = []
     } catch (error) {
       codexError = formatCodexError(error)
@@ -115,7 +136,7 @@
     formHiddenModels = [...(profile.hiddenModels ?? [])]
     formFavoriteModels = [...(profile.favoriteModels ?? [])]
     formPingEnabled = profile.pingEnabled ?? false
-    if (formProviderType === 'openai-codex') void loadCodexAccount()
+    if (isCodexProvider()) void loadCodexAccount()
     prevPingEnabled = formPingEnabled
     fetchError = null
     openCollapsibles = new SvelteSet([...openCollapsibles, profile.id])
@@ -152,7 +173,7 @@
       name: formName.trim(),
       providerType: formProviderType,
       baseUrl: formBaseUrl.trim().replace(/\/$/, '') || undefined,
-      apiKey: formProviderType === 'openai-codex' ? '' : formApiKey,
+      apiKey: isCodexProvider() ? '' : formApiKey,
       customModels: formCustomModels,
       fetchedModels: formFetchedModels,
       hiddenModels: formHiddenModels,
@@ -280,7 +301,7 @@
       name: formName.trim(),
       providerType: formProviderType,
       baseUrl: formBaseUrl.trim().replace(/\/$/, '') || undefined,
-      apiKey: formProviderType === 'openai-codex' ? '' : formApiKey,
+      apiKey: isCodexProvider() ? '' : formApiKey,
       customModels: formCustomModels,
       fetchedModels: formFetchedModels,
       hiddenModels: formHiddenModels,
@@ -342,22 +363,39 @@
   onDestroy(() => {
     mounted = false
     unlistenCodexLogin?.()
+    unlistenCodexHermesLogin?.()
     flushAutoSave()
   })
 
+  function handleCodexLoginCompleted(payload: CodexLoginCompleted) {
+    isCodexLoggingIn = false
+    codexUserCode = null
+    if (!payload.success) {
+      codexError = payload.error || 'Codex sign-in was not completed'
+      return
+    }
+
+    codexError = null
+    void loadCodexAccount()
+  }
+
   onMount(() => {
     void listen<CodexLoginCompleted>('codex-login-completed', (event) => {
-      isCodexLoggingIn = false
-      if (!event.payload.success) {
-        codexError = event.payload.error || 'Codex sign-in was not completed'
-        return
-      }
-
-      codexError = null
-      void loadCodexAccount()
+      handleCodexLoginCompleted(event.payload)
     })
       .then((unlisten) => {
         if (mounted) unlistenCodexLogin = unlisten
+        else unlisten()
+      })
+      .catch(() => {
+        // The event bridge is unavailable outside the Tauri runtime.
+      })
+
+    void listen<CodexLoginCompleted>('codex-hermes-login-completed', (event) => {
+      handleCodexLoginCompleted(event.payload)
+    })
+      .then((unlisten) => {
+        if (mounted) unlistenCodexHermesLogin = unlisten
         else unlisten()
       })
       .catch(() => {
@@ -370,7 +408,7 @@
     formProviderType = v
     formName = PROVIDERS[v].name
     formBaseUrl = ''
-    if (v === 'openai-codex') formApiKey = ''
+    if (isCodexProvider(v)) formApiKey = ''
     formFetchedModels = []
     formCustomModels = []
     formHiddenModels = []
@@ -378,7 +416,12 @@
     if (!isPingEligibleProvider(v)) formPingEnabled = false
     fetchError = null
     codexError = null
-    if (v === 'openai-codex') void loadCodexAccount()
+    codexUserCode = null
+    if (isCodexProvider(v)) {
+      void loadCodexAccount()
+    } else {
+      codexAccount = null
+    }
   }
 </script>
 
@@ -421,6 +464,7 @@
           {isFetchingModels}
           {fetchError}
           {codexAccount}
+          {codexUserCode}
           {isCodexLoggingIn}
           {codexError}
           onFetchModels={handleFetchModels}
@@ -539,6 +583,7 @@
                 {isFetchingModels}
                 {fetchError}
                 {codexAccount}
+                {codexUserCode}
                 {isCodexLoggingIn}
                 {codexError}
                 onFetchModels={handleFetchModels}

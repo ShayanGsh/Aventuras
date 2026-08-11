@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ProviderType, TextModel } from '$lib/types'
   import type { CodexAccount } from '$lib/services/codex'
+  import type { CodexHermesAccount } from '$lib/services/codexHermes'
   import { PROVIDERS, hasDefaultEndpoint } from '$lib/services/ai/sdk/providers/config'
   import ProviderTypeSelector from './ProviderTypeSelector.svelte'
   import { isMobileDevice } from '$lib/utils/swipe'
@@ -42,7 +43,8 @@
     // UI state (from parent)
     isFetchingModels: boolean
     fetchError: string | null
-    codexAccount: CodexAccount | null
+    codexAccount: CodexAccount | CodexHermesAccount | null
+    codexUserCode: string | null
     isCodexLoggingIn: boolean
     codexError: string | null
 
@@ -74,6 +76,7 @@
     isFetchingModels,
     fetchError,
     codexAccount,
+    codexUserCode,
     isCodexLoggingIn,
     codexError,
     onFetchModels,
@@ -204,7 +207,7 @@
         class="font-mono text-xs"
       />
     </div>
-  {:else if providerType !== 'openai-codex'}
+  {:else if providerType !== 'openai-codex' && providerType !== 'openai-codex-hermes'}
     <div class="space-y-1">
       <button
         class="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium transition-colors"
@@ -230,13 +233,22 @@
   {/if}
 
   <!-- API Key -->
-  {#if providerType === 'openai-codex'}
+  {#if providerType === 'openai-codex' || providerType === 'openai-codex-hermes'}
     <div class="space-y-2">
-      <Label>ChatGPT account (Codex CLI)</Label>
+      <Label>
+        ChatGPT account ({providerType === 'openai-codex-hermes'
+          ? 'Hermes transport'
+          : 'Codex CLI'})
+      </Label>
       <div class="bg-muted/30 space-y-2 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">
-          Sign in through the installed Codex CLI. Aventuras delegates authentication and model
-          access to it.
+          {#if providerType === 'openai-codex-hermes'}
+            Sign in directly with ChatGPT. Aventuras stores a separate OAuth session and does not
+            require the Codex CLI.
+          {:else}
+            Sign in through the installed Codex CLI. Aventuras delegates authentication and model
+            access to it.
+          {/if}
         </p>
         {#if codexAccount}
           <div class="text-sm">
@@ -257,12 +269,23 @@
           </div>
         {:else}
           <Button size="sm" onclick={onCodexLogin} disabled={isCodexLoggingIn}>
-            {isCodexLoggingIn ? 'Opening sign-in...' : 'Sign in with ChatGPT via Codex CLI'}
+            {isCodexLoggingIn
+              ? 'Opening sign-in...'
+              : providerType === 'openai-codex-hermes'
+                ? 'Sign in with ChatGPT'
+                : 'Sign in with ChatGPT via Codex CLI'}
           </Button>
         {/if}
         {#if isCodexLoggingIn}
           <p class="text-muted-foreground text-xs">
-            Complete sign-in in your browser, then return here.
+            {#if providerType === 'openai-codex-hermes' && codexUserCode}
+              Open the sign-in page and enter this code:
+              <code class="bg-muted mt-1 block rounded px-2 py-1 font-mono text-sm">
+                {codexUserCode}
+              </code>
+            {:else}
+              Complete sign-in in your browser, then return here.
+            {/if}
           </p>
         {/if}
         {#if codexError}
