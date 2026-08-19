@@ -25,6 +25,7 @@ import {
   WORLD_STATE_INJECTION_DEFAULTS,
 } from '$lib/services/ai/core/defaults'
 import {
+  migrateCodexProvider,
   migrateEntryRetrieval,
   migrateImageGeneration,
   migrateWorldStateBudget,
@@ -59,21 +60,25 @@ function mergeProfileModels(fetchedModels: TextModel[], customModels: string[]):
 }
 
 function migrateLegacyCodexProfile(profile: APIProfile): APIProfile {
-  const providerType = profile.providerType as string
+  const migrated = migrateCodexProvider({
+    ...profile,
+    providerType: profile.providerType as string,
+  }) as APIProfile
+  const providerType = migrated.providerType
   const hasKnownProvider = Object.prototype.hasOwnProperty.call(PROVIDERS, providerType)
-  const hasCredentials = !!profile.apiKey?.trim() || !!profile.baseUrl?.trim()
+  const hasCredentials = !!migrated.apiKey?.trim() || !!migrated.baseUrl?.trim()
   const hasModels =
-    (profile.fetchedModels?.length ?? 0) > 0 || (profile.customModels?.length ?? 0) > 0
+    (migrated.fetchedModels?.length ?? 0) > 0 || (migrated.customModels?.length ?? 0) > 0
 
   if (!hasKnownProvider && !hasCredentials && hasModels) {
     return {
-      ...profile,
-      name: PROVIDERS['openai-codex-direct'].name,
-      providerType: 'openai-codex-direct',
+      ...migrated,
+      name: PROVIDERS['openai-codex'].name,
+      providerType: 'openai-codex',
     }
   }
 
-  return profile
+  return migrated
 }
 
 function normalizeProfile(profile: APIProfile): APIProfile {

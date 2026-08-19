@@ -313,26 +313,8 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
   },
 
   'openai-codex': {
-    name: 'OpenAI Codex-CLI',
-    description: 'Use ChatGPT sign-in through the installed Codex CLI',
-    baseUrl: '',
-    requiresApiKey: false,
-    capabilities: {
-      textGeneration: true,
-      imageGeneration: false,
-      structuredOutput: false,
-      reasoning: true,
-      modelCapabilityFetching: true,
-      toolCalling: true,
-    },
-    // Authentication and generation use the native Codex App Server exposed by
-    // the installed Codex CLI.
-    // No API key or service defaults are stored in Aventuras.
-  },
-
-  'openai-codex-direct': {
     name: 'OpenAI Codex',
-    description: 'Use ChatGPT sign-in with Codex HTTP access',
+    description: 'Use ChatGPT sign-in with Codex access',
     baseUrl: '',
     requiresApiKey: false,
     capabilities: {
@@ -343,8 +325,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       modelCapabilityFetching: true,
       toolCalling: true,
     },
-    // Authentication and generation use Aventuras' own direct OAuth
-    // transport rather than the installed Codex CLI.
+    // Authentication and generation use Aventuras' OAuth-backed Codex transport.
   },
 
   openai: {

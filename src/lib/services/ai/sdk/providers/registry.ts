@@ -168,10 +168,6 @@ function createProviderFromProfile(options: {
     case 'openai-codex':
       return (modelId: string) => createCodexLanguageModel('openai-codex', modelId, toolExecutor)
 
-    case 'openai-codex-direct':
-      return (modelId: string) =>
-        createCodexLanguageModel('openai-codex-direct', modelId, toolExecutor)
-
     case 'xai':
       return createXai({ apiKey: profile.apiKey, baseURL, fetch })
 

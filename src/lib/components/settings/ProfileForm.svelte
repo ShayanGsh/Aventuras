@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { ProviderType, TextModel } from '$lib/types'
   import type { CodexAccount } from '$lib/services/codex'
-  import type { CodexDirectAccount } from '$lib/services/codexDirect'
   import { PROVIDERS, hasDefaultEndpoint } from '$lib/services/ai/sdk/providers/config'
   import ProviderTypeSelector from './ProviderTypeSelector.svelte'
   import { isMobileDevice } from '$lib/utils/swipe'
@@ -43,7 +42,7 @@
     // UI state (from parent)
     isFetchingModels: boolean
     fetchError: string | null
-    codexAccount: CodexAccount | CodexDirectAccount | null
+    codexAccount: CodexAccount | null
     codexUserCode: string | null
     isCodexLoggingIn: boolean
     codexError: string | null
@@ -207,7 +206,7 @@
         class="font-mono text-xs"
       />
     </div>
-  {:else if providerType !== 'openai-codex' && providerType !== 'openai-codex-direct'}
+  {:else if providerType !== 'openai-codex'}
     <div class="space-y-1">
       <button
         class="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs font-medium transition-colors"
@@ -233,22 +232,12 @@
   {/if}
 
   <!-- API Key -->
-  {#if providerType === 'openai-codex' || providerType === 'openai-codex-direct'}
+  {#if providerType === 'openai-codex'}
     <div class="space-y-2">
-      <Label>
-        ChatGPT account ({providerType === 'openai-codex-direct'
-          ? 'Direct transport'
-          : 'Codex CLI'})
-      </Label>
+      <Label>ChatGPT account</Label>
       <div class="bg-muted/30 space-y-2 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">
-          {#if providerType === 'openai-codex-direct'}
-            Sign in directly with ChatGPT. Aventuras stores a separate OAuth session and does not
-            require the Codex CLI.
-          {:else}
-            Sign in through the installed Codex CLI. Aventuras delegates authentication and model
-            access to it.
-          {/if}
+          Sign in with ChatGPT. Aventuras manages the OAuth session for this provider.
         </p>
         {#if codexAccount}
           <div class="text-sm">
@@ -269,16 +258,12 @@
           </div>
         {:else}
           <Button size="sm" onclick={onCodexLogin} disabled={isCodexLoggingIn}>
-            {isCodexLoggingIn
-              ? 'Opening sign-in...'
-              : providerType === 'openai-codex-direct'
-                ? 'Sign in with ChatGPT'
-                : 'Sign in with ChatGPT via Codex CLI'}
+            {isCodexLoggingIn ? 'Opening sign-in...' : 'Sign in with ChatGPT'}
           </Button>
         {/if}
         {#if isCodexLoggingIn}
           <p class="text-muted-foreground text-xs">
-            {#if providerType === 'openai-codex-direct' && codexUserCode}
+            {#if codexUserCode}
               Open the sign-in page and enter this code:
               <code class="bg-muted mt-1 block rounded px-2 py-1 font-mono text-sm">
                 {codexUserCode}

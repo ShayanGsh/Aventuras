@@ -7,8 +7,6 @@
   import type { APIProfile, ProviderType, TextModel } from '$lib/types'
   import type { CodexAccount } from '$lib/services/codex'
   import { codexService } from '$lib/services/codex'
-  import type { CodexDirectAccount } from '$lib/services/codexDirect'
-  import { codexDirectService } from '$lib/services/codexDirect'
   import { fetchModelsFromProvider } from '$lib/services/ai/sdk/providers'
   import { PROVIDERS } from '$lib/services/ai/sdk/providers/config'
   import { pingProfileModels, isPingEligible } from '$lib/services/modelHealthOrchestrator'
@@ -47,12 +45,11 @@
   let isFetchingModels = $state(false)
   let fetchError = $state<string | null>(null)
   let openCollapsibles = $state<Set<string>>(new Set())
-  let codexAccount = $state<CodexAccount | CodexDirectAccount | null>(null)
+  let codexAccount = $state<CodexAccount | null>(null)
   let isCodexLoggingIn = $state(false)
   let codexError = $state<string | null>(null)
   let codexUserCode = $state<string | null>(null)
   let unlistenCodexLogin: (() => void) | undefined
-  let unlistenCodexDirectLogin: (() => void) | undefined
 
   interface CodexLoginCompleted {
     loginId: string | null
@@ -65,15 +62,12 @@
   }
 
   function isCodexProvider(providerType: ProviderType = formProviderType): boolean {
-    return providerType === 'openai-codex' || providerType === 'openai-codex-direct'
+    return providerType === 'openai-codex'
   }
 
   async function loadCodexAccount() {
     try {
-      const state =
-        formProviderType === 'openai-codex-direct'
-          ? await codexDirectService.readAccount()
-          : await codexService.readAccount()
+      const state = await codexService.readAccount()
       codexAccount = state.account
       codexError = null
     } catch (error) {
@@ -88,10 +82,7 @@
     codexUserCode = null
 
     try {
-      const login =
-        formProviderType === 'openai-codex-direct'
-          ? await codexDirectService.startLogin()
-          : await codexService.startLogin()
+      const login = await codexService.startLogin()
       codexUserCode = login.userCode || null
       const loginUrl = login.authUrl ?? login.verificationUrl
       if (!loginUrl) {
@@ -107,11 +98,7 @@
   async function handleCodexLogout() {
     codexError = null
     try {
-      if (formProviderType === 'openai-codex-direct') {
-        await codexDirectService.logout()
-      } else {
-        await codexService.logout()
-      }
+      await codexService.logout()
       codexAccount = null
       codexUserCode = null
       formFetchedModels = []
@@ -363,7 +350,6 @@
   onDestroy(() => {
     mounted = false
     unlistenCodexLogin?.()
-    unlistenCodexDirectLogin?.()
     flushAutoSave()
   })
 
@@ -385,17 +371,6 @@
     })
       .then((unlisten) => {
         if (mounted) unlistenCodexLogin = unlisten
-        else unlisten()
-      })
-      .catch(() => {
-        // The event bridge is unavailable outside the Tauri runtime.
-      })
-
-    void listen<CodexLoginCompleted>('codex-direct-login-completed', (event) => {
-      handleCodexLoginCompleted(event.payload)
-    })
-      .then((unlisten) => {
-        if (mounted) unlistenCodexDirectLogin = unlisten
         else unlisten()
       })
       .catch(() => {

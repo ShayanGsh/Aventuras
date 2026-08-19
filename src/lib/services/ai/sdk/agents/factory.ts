@@ -78,9 +78,8 @@ function resolveAgentConfig(
   }
 
   const reasoning = preset.reasoningEffort
-  const toolExecutor = isCodexProvider(profile.providerType) && tools
-    ? createCodexToolExecutor(tools)
-    : undefined
+  const toolExecutor =
+    isCodexProvider(profile.providerType) && tools ? createCodexToolExecutor(tools) : undefined
 
   const baseModel = createModelFromProfile({
     profile,
@@ -100,14 +99,13 @@ function resolveAgentConfig(
 }
 
 function isCodexProvider(providerType: ProviderType): boolean {
-  return providerType === 'openai-codex' || providerType === 'openai-codex-direct'
+  return providerType === 'openai-codex'
 }
 
 function createCodexToolExecutor(tools: ToolSet): CodexToolExecutor {
   return async (toolName, input, { toolCallId, signal }) => {
     const tool = tools[toolName] as
-      | { execute?: (input: unknown, options: unknown) => unknown }
-      | undefined
+      { execute?: (input: unknown, options: unknown) => unknown } | undefined
     if (!tool?.execute) {
       throw new Error(`Codex requested an unavailable Aventuras tool: ${toolName}`)
     }

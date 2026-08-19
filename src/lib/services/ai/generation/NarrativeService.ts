@@ -13,7 +13,6 @@
 
 import { streamNarrative, generateNarrative } from '../sdk/generate'
 import { codexService } from '$lib/services/codex'
-import { codexDirectService } from '$lib/services/codexDirect'
 import { settings } from '$lib/stores/settings.svelte'
 import { ContextBuilder } from '$lib/services/context'
 import { formatLengthInstruction } from '$lib/services/prompts/templates'
@@ -306,14 +305,8 @@ export class NarrativeService {
 
     try {
       const mainProfile = settings.getMainNarrativeProfile()
-      const codexTransport =
-        mainProfile?.providerType === 'openai-codex'
-          ? codexService
-          : mainProfile?.providerType === 'openai-codex-direct'
-            ? codexDirectService
-            : null
-      if (codexTransport) {
-        for await (const part of codexTransport.streamTurn({
+      if (mainProfile?.providerType === 'openai-codex') {
+        for await (const part of codexService.streamTurn({
           model: settings.apiSettings.defaultModel,
           system: systemPrompt,
           prompt,
@@ -386,14 +379,8 @@ export class NarrativeService {
     const prompt = `${primingMessage}\n\n${userPrompt}`
 
     const mainProfile = settings.getMainNarrativeProfile()
-    const codexTransport =
-      mainProfile?.providerType === 'openai-codex'
-        ? codexService
-        : mainProfile?.providerType === 'openai-codex-direct'
-          ? codexDirectService
-          : null
-    if (codexTransport) {
-      return codexTransport.generateText({
+    if (mainProfile?.providerType === 'openai-codex') {
+      return codexService.generateText({
         model: settings.apiSettings.defaultModel,
         system: systemPrompt,
         prompt,

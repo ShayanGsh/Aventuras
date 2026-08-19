@@ -1,28 +1,39 @@
+use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{broadcast, oneshot, Mutex};
-use tokio::time::timeout;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{oneshot, Mutex};
+use tokio::time::sleep;
+use uuid::Uuid;
 
+const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const CODEX_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
+const OAUTH_ISSUER: &str = "https://auth.openai.com";
+const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OAUTH_DEVICE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const OAUTH_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const OAUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+const AUTH_FILE_NAME: &str = "codex-auth.json";
+const LEGACY_AUTH_FILE_NAME: &str = "codex-direct-auth.json";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.0.0 (Aventuras)";
+const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+const TOKEN_REFRESH_SKEW_SECONDS: i64 = 120;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const NOTIFICATION_BUFFER: usize = 256;
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-#[derive(Debug, Clone)]
-pub struct CodexNotification {
-    pub method: String,
-    pub params: Value,
-    pub request_id: Option<Value>,
+#[derive(Default, Clone)]
+pub struct CodexState {
+    active_turns: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAccount {
     #[serde(rename = "type")]
@@ -31,62 +42,28 @@ pub struct CodexAccount {
     pub plan_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAccountState {
     pub account: Option<CodexAccount>,
     pub requires_openai_auth: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexLoginStart {
-    #[serde(rename = "type")]
     pub login_type: String,
-    pub login_id: Option<String>,
-    pub auth_url: Option<String>,
-    pub verification_url: Option<String>,
-    pub user_code: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexModelReasoningEffort {
-    pub reasoning_effort: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexModel {
-    pub id: String,
-    pub model: Option<String>,
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub hidden: bool,
-    pub default_reasoning_effort: Option<String>,
-    #[serde(default)]
-    pub supported_reasoning_efforts: Vec<CodexModelReasoningEffort>,
-    #[serde(default)]
-    pub input_modalities: Vec<String>,
-    #[serde(default)]
-    pub is_default: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CodexModelListPage {
-    #[serde(default)]
-    data: Vec<CodexModel>,
-    next_cursor: Option<String>,
+    pub login_id: String,
+    pub auth_url: String,
+    pub verification_url: String,
+    pub user_code: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexLoginCompleted {
-    login_id: Option<String>,
-    success: bool,
-    error: Option<String>,
+pub struct CodexModel {
+    pub id: String,
+    pub reasoning: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,8 +82,6 @@ struct CodexTurnDelta {
     reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call: Option<CodexToolCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_result: Option<CodexToolResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,19 +90,13 @@ struct CodexToolCall {
     id: String,
     name: String,
     input: Value,
-    provider_executed: bool,
-    dynamic: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CodexToolResult {
+#[derive(Debug, Clone)]
+struct PendingFunctionCall {
     id: String,
     name: String,
-    result: Value,
-    is_error: bool,
-    provider_executed: bool,
-    dynamic: bool,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,413 +108,473 @@ struct CodexTurnCompleted {
     error: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexThreadStartResponse {
-    thread: CodexThreadReference,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexLoginCompleted {
+    login_id: String,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCodexAuth {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<i64>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexThreadReference {
-    id: String,
+struct DeviceCodeResponse {
+    user_code: String,
+    device_auth_id: String,
+    interval: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexTurnStartResponse {
-    turn: CodexTurnReference,
+struct DeviceAuthTokenResponse {
+    authorization_code: String,
+    code_verifier: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct CodexTurnReference {
-    id: String,
-    status: String,
-    #[serde(default)]
-    error: Option<CodexTurnError>,
+struct OAuthTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexTurnError {
-    message: String,
+enum TurnResult {
+    Completed,
+    Interrupted,
+    Failed(String),
 }
 
-#[derive(Debug, Deserialize)]
-struct RpcErrorPayload {
-    code: i64,
-    message: String,
-    #[serde(default)]
-    data: Option<Value>,
+fn auth_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join(AUTH_FILE_NAME))
+        .map_err(|error| format!("Failed to resolve Codex auth directory: {error}"))
 }
 
-impl Display for RpcErrorPayload {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(data) = &self.data {
-            write!(formatter, "{} ({}): {}", self.message, self.code, data)
-        } else {
-            write!(formatter, "{} ({})", self.message, self.code)
-        }
-    }
+fn legacy_auth_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join(LEGACY_AUTH_FILE_NAME))
+        .map_err(|error| format!("Failed to resolve Codex auth directory: {error}"))
 }
 
-type PendingResponse = Result<Value, String>;
-
-pub struct CodexConnection {
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>,
-    next_request_id: AtomicU64,
-    notification_tx: broadcast::Sender<CodexNotification>,
-}
-
-impl CodexConnection {
-    async fn spawn() -> Result<Arc<Self>, String> {
-        let mut child = spawn_codex_process()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Codex app-server did not expose stdin".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Codex app-server did not expose stdout".to_string())?;
-        let (notification_tx, _) = broadcast::channel(NOTIFICATION_BUFFER);
-
-        let connection = Arc::new(Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
-            pending: Mutex::new(HashMap::new()),
-            next_request_id: AtomicU64::new(1),
-            notification_tx,
-        });
-
-        let reader_connection = Arc::clone(&connection);
-        tauri::async_runtime::spawn(async move {
-            reader_connection.read_stdout(stdout).await;
-        });
-
-        Ok(connection)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<CodexNotification> {
-        self.notification_tx.subscribe()
-    }
-
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-
-        self.pending.lock().await.insert(id, sender);
-
-        let request = build_request(id, method, params);
-        if let Err(error) = self.send_message(request).await {
-            self.pending.lock().await.remove(&id);
-            return Err(error);
-        }
-
-        match timeout(REQUEST_TIMEOUT, receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!("Codex app-server canceled request: {method}")),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(format!("Codex app-server request timed out: {method}"))
+fn read_auth(app: &AppHandle) -> Result<Option<StoredCodexAuth>, String> {
+    let path = auth_file_path(app)?;
+    let legacy_path = legacy_auth_file_path(app)?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::read_to_string(&legacy_path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(format!("Failed to read Codex auth: {error}")),
             }
         }
-    }
+        Err(error) => return Err(format!("Failed to read Codex auth: {error}")),
+    };
 
-    pub async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
-        self.send_message(build_notification(method, params)).await
-    }
-
-    pub async fn respond(&self, request_id: Value, result: Value) -> Result<(), String> {
-        self.send_message(json!({
-            "id": request_id,
-            "result": result
-        }))
-        .await
-    }
-
-    async fn send_message(&self, message: Value) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().await;
-        let encoded = serde_json::to_string(&message)
-            .map_err(|error| format!("Failed to encode Codex request: {error}"))?;
-
-        stdin
-            .write_all(encoded.as_bytes())
-            .await
-            .map_err(|error| format!("Failed to write to Codex app-server: {error}"))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|error| format!("Failed to terminate Codex request: {error}"))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|error| format!("Failed to flush Codex request: {error}"))
-    }
-
-    async fn read_stdout(self: Arc<Self>, stdout: ChildStdout) {
-        let mut lines = BufReader::new(stdout).lines();
-
-        loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => {
-                    self.fail_pending("Codex app-server closed its output stream".to_string())
-                        .await;
-                    return;
-                }
-                Err(error) => {
-                    self.fail_pending(format!("Failed to read from Codex app-server: {error}"))
-                        .await;
-                    return;
-                }
-            };
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let message: Value = match serde_json::from_str(&line) {
-                Ok(message) => message,
-                Err(error) => {
-                    eprintln!("[Codex] Ignoring invalid app-server message: {error}");
-                    continue;
-                }
-            };
-
-            if let Some(method) = message.get("method").and_then(Value::as_str) {
-                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-                let _ = self.notification_tx.send(CodexNotification {
-                    method: method.to_string(),
-                    params,
-                    request_id: message.get("id").cloned(),
-                });
-
-                // Dynamic tool calls are handled by the active turn monitor. Other
-                // server-initiated requests still receive an explicit rejection so
-                // the app-server does not wait indefinitely.
-                if method == "item/tool/call" {
-                    continue;
-                }
-                if let Some(id) = message.get("id") {
-                    let _ = self
-                        .send_message(json!({
-                            "id": id,
-                            "error": {
-                                "code": -32601,
-                                "message": "Aventuras does not support this server request yet"
-                            }
-                        }))
-                        .await;
-                }
-                continue;
-            }
-
-            let Some(id) = message.get("id").and_then(Value::as_u64) else {
-                continue;
-            };
-
-            let Some(sender) = self.pending.lock().await.remove(&id) else {
-                continue;
-            };
-
-            let result = if let Some(error) = message.get("error") {
-                match serde_json::from_value::<RpcErrorPayload>(error.clone()) {
-                    Ok(error) => Err(error.to_string()),
-                    Err(parse_error) => {
-                        Err(format!("Codex returned an invalid error: {parse_error}"))
-                    }
-                }
-            } else if let Some(result) = message.get("result") {
-                Ok(result.clone())
-            } else {
-                Err("Codex returned a response without a result or error".to_string())
-            };
-
-            let _ = sender.send(result);
-        }
-    }
-
-    async fn fail_pending(&self, error: String) {
-        let mut pending = self.pending.lock().await;
-        for (_, sender) in pending.drain() {
-            let _ = sender.send(Err(error.clone()));
-        }
-    }
-
-    async fn is_alive(&self) -> bool {
-        self.child
-            .lock()
-            .await
-            .try_wait()
-            .map(|status| status.is_none())
-            .unwrap_or(false)
-    }
-
-    async fn shutdown(&self) {
-        let mut child = self.child.lock().await;
-        if let Err(error) = child.kill().await {
-            eprintln!("[Codex] Failed to stop app-server: {error}");
-        }
-    }
+    let auth = serde_json::from_str(&contents)
+        .map_err(|error| format!("Codex auth is invalid: {error}"))?;
+    Ok(Some(auth))
 }
 
-#[derive(Default)]
-pub struct CodexState {
-    connection: Mutex<Option<Arc<CodexConnection>>>,
-}
-
-impl CodexState {
-    pub async fn connection(&self) -> Result<Arc<CodexConnection>, String> {
-        let mut slot = self.connection.lock().await;
-
-        if let Some(existing) = slot.as_ref() {
-            if existing.is_alive().await {
-                return Ok(Arc::clone(existing));
-            }
-        }
-
-        if let Some(previous) = slot.take() {
-            previous.shutdown().await;
-        }
-
-        let connection = CodexConnection::spawn().await?;
-        connection
-            .request(
-                "initialize",
-                json!({
-                    "capabilities": {
-                        "experimentalApi": true
-                    },
-                    "clientInfo": {
-                        "name": "aventuras",
-                        "title": "Aventuras",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            )
-            .await?;
-        connection.notify("initialized", json!({})).await?;
-
-        *slot = Some(Arc::clone(&connection));
-        Ok(connection)
+fn save_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<(), String> {
+    let path = auth_file_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create Codex auth directory: {error}"))?;
     }
 
-    pub async fn disconnect(&self) {
-        if let Some(connection) = self.connection.lock().await.take() {
-            connection.shutdown().await;
+    let encoded = serde_json::to_vec_pretty(auth)
+        .map_err(|error| format!("Failed to encode Codex auth: {error}"))?;
+    fs::write(&path, encoded).map_err(|error| format!("Failed to save Codex auth: {error}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Failed to protect Codex auth: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn delete_auth(app: &AppHandle) -> Result<(), String> {
+    for path in [auth_file_path(app)?, legacy_auth_file_path(app)?] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to remove Codex auth: {error}")),
         }
     }
+    Ok(())
 }
 
-#[tauri::command]
-pub async fn codex_account_read(state: State<'_, CodexState>) -> Result<CodexAccountState, String> {
-    let connection = state.connection().await?;
-    let response = connection.request("account/read", json!({})).await?;
-    serde_json::from_value(response)
-        .map_err(|error| format!("Codex returned an invalid account response: {error}"))
+fn jwt_claims(access_token: &str) -> Option<Value> {
+    let payload = access_token.split('.').nth(1)?;
+    let padded = format!("{payload}{}", "=".repeat((4 - payload.len() % 4) % 4));
+    let bytes = URL_SAFE.decode(padded).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
-#[tauri::command]
-pub async fn codex_login_start(
-    app: AppHandle,
-    state: State<'_, CodexState>,
-) -> Result<CodexLoginStart, String> {
-    let connection = state.connection().await?;
-    let mut notifications = connection.subscribe();
-    let response = connection
-        .request(
-            "account/login/start",
-            json!({
-                "type": "chatgpt",
-                "useHostedLoginSuccessPage": true,
-                "appBrand": "chatgpt"
-            }),
+fn account_id_from_token(access_token: &str) -> Option<String> {
+    jwt_claims(access_token)?
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(String::from)
+}
+
+fn expiry_from_token(access_token: &str) -> Option<i64> {
+    jwt_claims(access_token)?.get("exp")?.as_i64()
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+fn token_needs_refresh(auth: &StoredCodexAuth) -> bool {
+    auth.expires_at
+        .map(|expires_at| expires_at <= unix_now() + TOKEN_REFRESH_SKEW_SECONDS)
+        .unwrap_or(false)
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent(CODEX_USER_AGENT)
+        .build()
+        .map_err(|error| format!("Failed to create Codex HTTP client: {error}"))
+}
+
+async fn response_error(context: &str, response: reqwest::Response) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail = body.trim();
+    if detail.is_empty() {
+        format!("{context} (HTTP {status})")
+    } else {
+        format!(
+            "{context} (HTTP {status}): {}",
+            detail.chars().take(500).collect::<String>()
         )
-        .await?;
-    let login: CodexLoginStart = serde_json::from_value(response)
-        .map_err(|error| format!("Codex returned an invalid login response: {error}"))?;
+    }
+}
 
-    let login_id = login.login_id.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let notification = match notifications.recv().await {
-                Ok(notification) => notification,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
+async fn refresh_auth(app: &AppHandle, auth: &StoredCodexAuth) -> Result<StoredCodexAuth, String> {
+    let refresh_token = auth
+        .refresh_token
+        .as_deref()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| "Codex sign-in has expired. Please sign in again.".to_string())?;
+    let client = http_client()?;
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", OAUTH_CLIENT_ID),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("Failed to refresh Codex sign-in: {error}"))?;
 
-            if notification.method != "account/login/completed" {
-                continue;
-            }
+    if !response.status().is_success() {
+        return Err(response_error("Codex sign-in refresh failed", response).await);
+    }
 
-            let notification_login_id = notification
-                .params
-                .get("loginId")
-                .and_then(Value::as_str)
-                .map(String::from);
-            if login_id.is_some() && notification_login_id != login_id {
-                continue;
-            }
+    let token_response: OAuthTokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Codex returned an invalid refresh response: {error}"))?;
+    let expires_at = token_response
+        .expires_in
+        .map(|expires_in| unix_now() + expires_in)
+        .or_else(|| expiry_from_token(&token_response.access_token));
+    let next = StoredCodexAuth {
+        account_id: account_id_from_token(&token_response.access_token)
+            .or_else(|| auth.account_id.clone()),
+        access_token: token_response.access_token,
+        refresh_token: token_response
+            .refresh_token
+            .or_else(|| auth.refresh_token.clone()),
+        expires_at,
+    };
+    save_auth(app, &next)?;
+    Ok(next)
+}
 
-            let success = notification
-                .params
-                .get("success")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let error = notification
-                .params
-                .get("error")
-                .and_then(Value::as_str)
-                .map(String::from);
+async fn resolve_auth(app: &AppHandle) -> Result<StoredCodexAuth, String> {
+    let mut auth = read_auth(app)?.ok_or_else(|| {
+        "No Codex sign-in found. Sign in with ChatGPT to use this provider.".to_string()
+    })?;
 
-            let _ = app.emit(
-                "codex-login-completed",
-                CodexLoginCompleted {
-                    login_id: notification_login_id,
-                    success,
-                    error,
-                },
-            );
-            break;
+    if auth.access_token.trim().is_empty() {
+        return Err("Codex sign-in has no access token. Please sign in again.".to_string());
+    }
+
+    if token_needs_refresh(&auth) {
+        auth = refresh_auth(app, &auth).await?;
+    }
+
+    if auth.account_id.is_none() {
+        auth.account_id = account_id_from_token(&auth.access_token);
+        save_auth(app, &auth)?;
+    }
+
+    Ok(auth)
+}
+
+fn apply_codex_headers(
+    request: reqwest::RequestBuilder,
+    auth: &StoredCodexAuth,
+) -> reqwest::RequestBuilder {
+    let request = request
+        .bearer_auth(&auth.access_token)
+        .header("originator", CODEX_ORIGINATOR);
+    match auth.account_id.as_deref() {
+        Some(account_id) if !account_id.is_empty() => {
+            request.header("ChatGPT-Account-Id", account_id)
         }
+        _ => request,
+    }
+}
+
+#[tauri::command]
+pub async fn codex_account_read(app: AppHandle) -> Result<CodexAccountState, String> {
+    if read_auth(&app)?.is_none() {
+        return Ok(CodexAccountState {
+            account: None,
+            requires_openai_auth: true,
+        });
+    }
+
+    let _auth = resolve_auth(&app).await?;
+    Ok(CodexAccountState {
+        account: Some(CodexAccount {
+            auth_mode: "chatgpt".to_string(),
+            email: None,
+            plan_type: None,
+        }),
+        requires_openai_auth: false,
+    })
+}
+
+#[tauri::command]
+pub async fn codex_login_start(app: AppHandle) -> Result<CodexLoginStart, String> {
+    let client = http_client()?;
+    let response = client
+        .post(OAUTH_DEVICE_URL)
+        .header("Content-Type", "application/json")
+        .json(&json!({ "client_id": OAUTH_CLIENT_ID }))
+        .send()
+        .await
+        .map_err(|error| format!("Failed to request Codex sign-in: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(response_error("Codex sign-in request failed", response).await);
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read Codex sign-in response: {error}"))?;
+    let device: DeviceCodeResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("Codex returned an invalid device code: {error}"))?;
+    if device.user_code.trim().is_empty() || device.device_auth_id.trim().is_empty() {
+        return Err("Codex sign-in response was missing the device code.".to_string());
+    }
+
+    let login = CodexLoginStart {
+        login_type: "device_code".to_string(),
+        login_id: device.device_auth_id.clone(),
+        auth_url: format!("{OAUTH_ISSUER}/codex/device"),
+        verification_url: format!("{OAUTH_ISSUER}/codex/device"),
+        user_code: device.user_code.clone(),
+    };
+
+    let app_for_login = app.clone();
+    let interval = device
+        .interval
+        .as_ref()
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+        .unwrap_or(5)
+        .max(3);
+    let login_id = device.device_auth_id.clone();
+    let user_code = device.user_code.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = complete_device_login(&app_for_login, &login_id, &user_code, interval).await;
+        let event = match result {
+            Ok(()) => CodexLoginCompleted {
+                login_id: login_id.clone(),
+                success: true,
+                error: None,
+            },
+            Err(error) => CodexLoginCompleted {
+                login_id: login_id.clone(),
+                success: false,
+                error: Some(error),
+            },
+        };
+        let _ = app_for_login.emit("codex-login-completed", event);
     });
 
     Ok(login)
 }
 
-#[tauri::command]
-pub async fn codex_logout(state: State<'_, CodexState>) -> Result<(), String> {
-    let connection = state.connection().await?;
-    connection.request("account/logout", json!({})).await?;
-    Ok(())
+async fn complete_device_login(
+    app: &AppHandle,
+    device_auth_id: &str,
+    user_code: &str,
+    interval_seconds: u64,
+) -> Result<(), String> {
+    let client = http_client()?;
+    let started = Instant::now();
+    let device_token = loop {
+        if started.elapsed() >= LOGIN_TIMEOUT {
+            return Err("Codex sign-in timed out. Please try again.".to_string());
+        }
+        sleep(Duration::from_secs(interval_seconds)).await;
+        let response = client
+            .post(OAUTH_DEVICE_TOKEN_URL)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "device_auth_id": device_auth_id,
+                "user_code": user_code
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Failed while waiting for Codex sign-in: {error}"))?;
+        let status = response.status();
+        if status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|error| format!("Failed to read Codex device authorization: {error}"))?;
+            break serde_json::from_str::<DeviceAuthTokenResponse>(&body).map_err(|error| {
+                format!("Codex returned an invalid device authorization: {error}")
+            })?;
+        }
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        return Err(response_error("Codex device authorization failed", response).await);
+    };
+
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", device_token.authorization_code.as_str()),
+            ("redirect_uri", OAUTH_REDIRECT_URI),
+            ("client_id", OAUTH_CLIENT_ID),
+            ("code_verifier", device_token.code_verifier.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("Failed to exchange Codex sign-in: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(response_error("Codex token exchange failed", response).await);
+    }
+
+    let token_response: OAuthTokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Codex returned an invalid token response: {error}"))?;
+    let expires_at = token_response
+        .expires_in
+        .map(|expires_in| unix_now() + expires_in)
+        .or_else(|| expiry_from_token(&token_response.access_token));
+    let auth = StoredCodexAuth {
+        account_id: account_id_from_token(&token_response.access_token),
+        access_token: token_response.access_token,
+        refresh_token: token_response.refresh_token,
+        expires_at,
+    };
+    save_auth(app, &auth)
 }
 
 #[tauri::command]
-pub async fn codex_list_models(state: State<'_, CodexState>) -> Result<Vec<CodexModel>, String> {
-    let connection = state.connection().await?;
-    let mut models = Vec::new();
-    let mut cursor: Option<String> = None;
+pub async fn codex_logout(app: AppHandle) -> Result<(), String> {
+    delete_auth(&app)
+}
 
-    loop {
-        let mut params = json!({
-            "limit": 100,
-            "includeHidden": false
-        });
-        if let Some(cursor) = &cursor {
-            params["cursor"] = Value::String(cursor.clone());
-        }
-
-        let response = connection.request("model/list", params).await?;
-        let page: CodexModelListPage = serde_json::from_value(response)
-            .map_err(|error| format!("Codex returned an invalid model list: {error}"))?;
-        models.extend(page.data);
-
-        match page.next_cursor {
-            Some(next_cursor) if !next_cursor.is_empty() => cursor = Some(next_cursor),
-            _ => break,
-        }
+#[tauri::command]
+pub async fn codex_list_models(app: AppHandle) -> Result<Vec<CodexModel>, String> {
+    let auth = resolve_auth(&app).await?;
+    let client = http_client()?;
+    let response = apply_codex_headers(
+        client
+            .get(CODEX_MODELS_URL)
+            .header("Accept", "application/json"),
+        &auth,
+    )
+    .send()
+    .await
+    .map_err(|error| format!("Failed to fetch Codex models: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error("Codex model discovery failed", response).await);
     }
 
-    Ok(models)
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Codex returned an invalid model list: {error}"))?;
+    let entries = body
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex returned a model list without models.".to_string())?;
+
+    let mut sortable = entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("slug")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let visibility = entry
+                .get("visibility")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if visibility == "hide" || visibility == "hidden" {
+                return None;
+            }
+            let priority = entry
+                .get("priority")
+                .and_then(Value::as_i64)
+                .unwrap_or(10_000);
+            Some((priority, id.to_string()))
+        })
+        .collect::<Vec<_>>();
+    sortable.sort_by(|left, right| left.cmp(right));
+
+    let mut seen = HashSet::new();
+    Ok(sortable
+        .into_iter()
+        .filter_map(|(_, id)| {
+            if seen.insert(id.clone()) {
+                Some(CodexModel {
+                    id,
+                    reasoning: true,
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -557,70 +586,55 @@ pub async fn codex_turn_start(
     prompt: String,
     reasoning_effort: String,
     output_schema: Option<Value>,
+    input: Option<Value>,
     tools: Option<Value>,
+    tool_choice: Option<Value>,
 ) -> Result<CodexTurnHandle, String> {
-    let connection = state.connection().await?;
-    let mut thread_params = json!({
-        "model": model,
-        "ephemeral": true,
-        "baseInstructions": system,
-        "approvalPolicy": "never",
-        "sandbox": "read-only",
-        "serviceName": "aventuras"
-    });
-    if let Some(tools) = normalize_dynamic_tools(tools) {
-        thread_params["dynamicTools"] = tools;
-    }
-    let thread_response = connection.request("thread/start", thread_params).await?;
-    let thread: CodexThreadStartResponse = serde_json::from_value(thread_response)
-        .map_err(|error| format!("Codex returned an invalid thread response: {error}"))?;
-
-    let notifications = connection.subscribe();
-    let mut turn_params = json!({
-        "threadId": thread.thread.id,
-        "model": model,
-        "effort": reasoning_effort,
-        "approvalPolicy": "never",
-        "sandboxPolicy": {
-            "type": "readOnly",
-            "networkAccess": false
-        },
-        "input": [{
-            "type": "text",
-            "text": prompt
-        }]
-    });
-    if let Some(output_schema) = output_schema {
-        turn_params["outputSchema"] = output_schema;
-    }
-
-    let turn_response = connection.request("turn/start", turn_params).await?;
-    let turn: CodexTurnStartResponse = serde_json::from_value(turn_response)
-        .map_err(|error| format!("Codex returned an invalid turn response: {error}"))?;
-
+    let auth = resolve_auth(&app).await?;
+    let turn_id = Uuid::new_v4().to_string();
     let handle = CodexTurnHandle {
-        thread_id: thread.thread.id,
-        turn_id: turn.turn.id,
+        thread_id: format!("codex-{turn_id}"),
+        turn_id: turn_id.clone(),
     };
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    state
+        .active_turns
+        .lock()
+        .await
+        .insert(turn_id.clone(), cancel_tx);
 
-    if turn.turn.status == "inProgress" {
-        let app = app.clone();
-        let thread_id = handle.thread_id.clone();
-        let turn_id = handle.turn_id.clone();
-        tauri::async_runtime::spawn(async move {
-            monitor_turn(app, notifications, thread_id, turn_id).await;
-        });
-    } else {
-        emit_turn_completed(
-            &app,
-            CodexTurnCompleted {
-                thread_id: handle.thread_id.clone(),
-                turn_id: handle.turn_id.clone(),
-                status: turn.turn.status,
-                error: turn.turn.error.map(|error| error.message),
-            },
-        );
-    }
+    let app_for_turn = app.clone();
+    let state_for_turn = state.inner().clone();
+    let handle_for_turn = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = run_turn(
+            &app_for_turn,
+            &handle_for_turn,
+            auth,
+            &model,
+            &system,
+            &prompt,
+            &reasoning_effort,
+            output_schema,
+            input,
+            tools,
+            tool_choice,
+            cancel_rx,
+        )
+        .await;
+
+        let (status, error) = match result {
+            TurnResult::Completed => ("completed".to_string(), None),
+            TurnResult::Interrupted => ("interrupted".to_string(), None),
+            TurnResult::Failed(error) => ("failed".to_string(), Some(error)),
+        };
+        emit_turn_completed(&app_for_turn, &handle_for_turn, status, error);
+        state_for_turn
+            .active_turns
+            .lock()
+            .await
+            .remove(&handle_for_turn.turn_id);
+    });
 
     Ok(handle)
 }
@@ -628,47 +642,186 @@ pub async fn codex_turn_start(
 #[tauri::command]
 pub async fn codex_turn_interrupt(
     state: State<'_, CodexState>,
-    thread_id: String,
     turn_id: String,
 ) -> Result<(), String> {
-    let connection = state.connection().await?;
-    connection
-        .request(
-            "turn/interrupt",
-            json!({
-                "threadId": thread_id,
-                "turnId": turn_id
-            }),
-        )
-        .await?;
+    if let Some(cancel) = state.active_turns.lock().await.remove(&turn_id) {
+        let _ = cancel.send(());
+    }
     Ok(())
-}
-
-#[tauri::command]
-pub async fn codex_tool_call_respond(
-    state: State<'_, CodexState>,
-    request_id: Value,
-    result: Value,
-) -> Result<(), String> {
-    let connection = state.connection().await?;
-    connection.respond(request_id, result).await
 }
 
 #[tauri::command]
 pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
-    state.disconnect().await;
+    let cancels = std::mem::take(&mut *state.active_turns.lock().await);
+    for cancel in cancels.into_values() {
+        let _ = cancel.send(());
+    }
     Ok(())
 }
 
-fn build_request(id: u64, method: &str, params: Value) -> Value {
-    json!({ "method": method, "id": id, "params": params })
+async fn run_turn(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    auth: StoredCodexAuth,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    reasoning_effort: &str,
+    output_schema: Option<Value>,
+    input: Option<Value>,
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
+    mut cancel: oneshot::Receiver<()>,
+) -> TurnResult {
+    let body = build_turn_body(
+        model,
+        system,
+        prompt,
+        reasoning_effort,
+        output_schema,
+        input,
+        tools,
+        tool_choice,
+    );
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => return TurnResult::Failed(error),
+    };
+    let response = match apply_codex_headers(
+        client
+            .post(format!("{CODEX_BASE_URL}/responses"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&body),
+        &auth,
+    )
+    .send()
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return TurnResult::Failed(format!("Codex request failed: {error}")),
+    };
+
+    if !response.status().is_success() {
+        return TurnResult::Failed(response_error("Codex request was rejected", response).await);
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut emitted_text = false;
+    let mut pending_function_calls = HashMap::new();
+    let mut emitted_tool_calls = HashSet::new();
+
+    loop {
+        let chunk = tokio::select! {
+            _ = &mut cancel => return TurnResult::Interrupted,
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else { break };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return TurnResult::Failed(format!("Codex stream failed: {error}")),
+        };
+        buffer.extend_from_slice(&chunk);
+
+        while let Some(event) = take_sse_event(&mut buffer) {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => return TurnResult::Failed(error),
+            };
+            if let Some(result) = handle_stream_event(
+                app,
+                handle,
+                &event,
+                &mut emitted_text,
+                &mut pending_function_calls,
+                &mut emitted_tool_calls,
+            ) {
+                return result;
+            }
+        }
+    }
+
+    if !buffer.is_empty() {
+        buffer.extend_from_slice(b"\n\n");
+        while let Some(event) = take_sse_event(&mut buffer) {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => return TurnResult::Failed(error),
+            };
+            if let Some(result) = handle_stream_event(
+                app,
+                handle,
+                &event,
+                &mut emitted_text,
+                &mut pending_function_calls,
+                &mut emitted_tool_calls,
+            ) {
+                return result;
+            }
+        }
+    }
+
+    if emitted_text || !emitted_tool_calls.is_empty() {
+        TurnResult::Completed
+    } else {
+        TurnResult::Failed("Codex stream ended without a response.".to_string())
+    }
 }
 
-fn build_notification(method: &str, params: Value) -> Value {
-    json!({ "method": method, "params": params })
+fn build_turn_body(
+    model: &str,
+    system: &str,
+    prompt: &str,
+    reasoning_effort: &str,
+    output_schema: Option<Value>,
+    input: Option<Value>,
+    tools: Option<Value>,
+    tool_choice: Option<Value>,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "instructions": system,
+        "input": input.unwrap_or_else(|| {
+            json!([{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": prompt }]
+            }])
+        }),
+        "store": false,
+        "stream": true
+    });
+
+    if let Some(tools) = normalize_tools(tools) {
+        body["tools"] = tools;
+    }
+    if let Some(tool_choice) = normalize_tool_choice(tool_choice) {
+        body["tool_choice"] = tool_choice;
+    }
+
+    match wire_reasoning_effort(reasoning_effort) {
+        Some(effort) => {
+            body["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+            body["include"] = json!(["reasoning.encrypted_content"]);
+        }
+        None => body["include"] = json!([]),
+    }
+
+    if let Some(schema) = output_schema {
+        body["text"] = json!({
+            "format": {
+                "type": "json_schema",
+                "name": "aventuras_output",
+                "strict": true,
+                "schema": schema
+            }
+        });
+    }
+
+    body
 }
 
-fn normalize_dynamic_tools(tools: Option<Value>) -> Option<Value> {
+fn normalize_tools(tools: Option<Value>) -> Option<Value> {
     let tools_value = tools?;
     let tools = tools_value.as_array()?.iter().filter_map(|tool| {
         if tool.get("type").and_then(Value::as_str) != Some("function") {
@@ -676,20 +829,18 @@ fn normalize_dynamic_tools(tools: Option<Value>) -> Option<Value> {
         }
 
         let name = tool.get("name").and_then(Value::as_str)?;
-        let input_schema = tool
+        let parameters = tool
             .get("inputSchema")
             .cloned()
             .or_else(|| tool.get("parameters").cloned())?;
         let mut normalized = json!({
             "type": "function",
             "name": name,
-            "inputSchema": input_schema
+            "parameters": parameters,
+            "strict": tool.get("strict").and_then(Value::as_bool).unwrap_or(false)
         });
         if let Some(description) = tool.get("description").and_then(Value::as_str) {
             normalized["description"] = json!(description);
-        }
-        if let Some(defer_loading) = tool.get("deferLoading").and_then(Value::as_bool) {
-            normalized["deferLoading"] = json!(defer_loading);
         }
         Some(normalized)
     });
@@ -697,381 +848,381 @@ fn normalize_dynamic_tools(tools: Option<Value>) -> Option<Value> {
     (!tools.is_empty()).then_some(Value::Array(tools))
 }
 
-fn dynamic_tool_call(item: &Value) -> Option<CodexToolCall> {
-    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
-        return None;
+fn normalize_tool_choice(tool_choice: Option<Value>) -> Option<Value> {
+    let tool_choice = tool_choice?;
+    match tool_choice.get("type").and_then(Value::as_str) {
+        Some("auto") => Some(json!("auto")),
+        Some("none") => Some(json!("none")),
+        Some("required") => Some(json!("required")),
+        Some("tool") => tool_choice
+            .get("toolName")
+            .and_then(Value::as_str)
+            .map(|name| json!({ "type": "function", "name": name })),
+        _ => None,
     }
-    let id = item
-        .get("id")
-        .or_else(|| item.get("callId"))
-        .and_then(Value::as_str)?
-        .to_string();
-    let name = item
-        .get("tool")
-        .or_else(|| item.get("name"))
-        .and_then(Value::as_str)?
-        .to_string();
-    Some(CodexToolCall {
-        id,
-        name,
-        input: item.get("arguments").cloned().unwrap_or_else(|| json!({})),
-        provider_executed: true,
-        dynamic: true,
-    })
 }
 
-fn dynamic_tool_result(item: &Value) -> Option<CodexToolResult> {
-    if item.get("type").and_then(Value::as_str) != Some("dynamicToolCall") {
-        return None;
+fn wire_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort {
+        "none" => None,
+        "minimal" => Some("low"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("high"),
+        "max" => Some("max"),
+        _ => Some("medium"),
     }
-    let id = item
-        .get("id")
-        .or_else(|| item.get("callId"))
-        .and_then(Value::as_str)?
-        .to_string();
-    let name = item
-        .get("tool")
-        .or_else(|| item.get("name"))
-        .and_then(Value::as_str)?
-        .to_string();
-    let status = item.get("status").and_then(Value::as_str);
-    let is_error = status.is_some_and(|status| status != "completed")
-        || item.get("success").and_then(Value::as_bool) == Some(false);
-    let result = item
-        .get("contentItems")
-        .cloned()
-        .or_else(|| item.get("result").cloned())
-        .unwrap_or(Value::Null);
-    Some(CodexToolResult {
-        id,
-        name,
-        result,
-        is_error,
-        provider_executed: true,
-        dynamic: true,
-    })
 }
 
-async fn monitor_turn(
-    app: AppHandle,
-    mut notifications: broadcast::Receiver<CodexNotification>,
-    thread_id: String,
-    turn_id: String,
-) {
+fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Result<Value, String>> {
     loop {
-        let notification = match notifications.recv().await {
-            Ok(notification) => notification,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => {
-                emit_turn_completed(
-                    &app,
-                    CodexTurnCompleted {
-                        thread_id,
-                        turn_id,
-                        status: "failed".to_string(),
-                        error: Some("Codex app-server closed its notification stream".to_string()),
-                    },
-                );
-                return;
-            }
-        };
-
-        let notification_thread_id = notification.params.get("threadId").and_then(Value::as_str);
-        if notification_thread_id != Some(thread_id.as_str()) {
-            continue;
-        }
-
-        match notification.method.as_str() {
-            "item/tool/call" => {
-                if notification.params.get("turnId").and_then(Value::as_str)
-                    != Some(turn_id.as_str())
-                {
-                    continue;
-                }
-                let Some(request_id) = notification.request_id else {
-                    continue;
-                };
-                let _ = app.emit(
-                    "codex-tool-call",
-                    json!({
-                        "requestId": request_id,
-                        "threadId": thread_id,
-                        "turnId": turn_id,
-                        "callId": notification.params.get("callId"),
-                        "namespace": notification.params.get("namespace"),
-                        "tool": notification.params.get("tool"),
-                        "arguments": notification.params.get("arguments")
-                    }),
-                );
-            }
-            "item/started" => {
-                if let Some(item) = notification.params.get("item") {
-                    if let Some(tool_call) = dynamic_tool_call(item) {
-                        emit_turn_delta(
-                            &app,
-                            CodexTurnDelta {
-                                thread_id: thread_id.clone(),
-                                turn_id: turn_id.clone(),
-                                content: String::new(),
-                                reasoning: None,
-                                tool_call: Some(tool_call),
-                                tool_result: None,
-                            },
-                        );
-                    }
-                }
-            }
-            "item/completed" => {
-                if let Some(item) = notification.params.get("item") {
-                    if let Some(tool_result) = dynamic_tool_result(item) {
-                        emit_turn_delta(
-                            &app,
-                            CodexTurnDelta {
-                                thread_id: thread_id.clone(),
-                                turn_id: turn_id.clone(),
-                                content: String::new(),
-                                reasoning: None,
-                                tool_call: None,
-                                tool_result: Some(tool_result),
-                            },
-                        );
-                    }
-                }
-            }
-            "item/agentMessage/delta" => {
-                if notification.params.get("turnId").and_then(Value::as_str)
-                    != Some(turn_id.as_str())
-                {
-                    continue;
-                }
-                if let Some(delta) = notification.params.get("delta").and_then(Value::as_str) {
-                    emit_turn_delta(
-                        &app,
-                        CodexTurnDelta {
-                            thread_id: thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            content: delta.to_string(),
-                            reasoning: None,
-                            tool_call: None,
-                            tool_result: None,
-                        },
-                    );
-                }
-            }
-            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                if notification.params.get("turnId").and_then(Value::as_str)
-                    != Some(turn_id.as_str())
-                {
-                    continue;
-                }
-                if let Some(delta) = notification.params.get("delta").and_then(Value::as_str) {
-                    emit_turn_delta(
-                        &app,
-                        CodexTurnDelta {
-                            thread_id: thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            content: String::new(),
-                            reasoning: Some(delta.to_string()),
-                            tool_call: None,
-                            tool_result: None,
-                        },
-                    );
-                }
-            }
-            "turn/completed" => {
-                let completed_turn_id = notification
-                    .params
-                    .get("turn")
-                    .and_then(|turn| turn.get("id"))
-                    .and_then(Value::as_str);
-                if completed_turn_id != Some(turn_id.as_str()) {
-                    continue;
-                }
-                let status = notification
-                    .params
-                    .get("turn")
-                    .and_then(|turn| turn.get("status"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_string();
-                let error = notification
-                    .params
-                    .get("turn")
-                    .and_then(|turn| turn.get("error"))
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .map(String::from);
-
-                emit_turn_completed(
-                    &app,
-                    CodexTurnCompleted {
-                        thread_id,
-                        turn_id,
-                        status,
-                        error,
-                    },
-                );
-                return;
-            }
-            _ => {}
+        let event_end = find_sse_event_end(buffer)?;
+        let event = buffer.drain(..event_end).collect::<Vec<_>>();
+        if let Some(event) = parse_sse_event(&event) {
+            return Some(event);
         }
     }
 }
 
-fn emit_turn_delta(app: &AppHandle, delta: CodexTurnDelta) {
-    let _ = app.emit("codex-turn-delta", delta);
-}
-
-fn emit_turn_completed(app: &AppHandle, completed: CodexTurnCompleted) {
-    let _ = app.emit("codex-turn-completed", completed);
-}
-
-fn spawn_codex_process() -> Result<Child, String> {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("CODEX_BIN") {
-        if !path.trim().is_empty() {
-            candidates.push(path);
+fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
+    for position in 0..buffer.len() {
+        let remaining = &buffer[position..];
+        if remaining.starts_with(b"\n\n") {
+            return Some(position + 2);
+        }
+        if remaining.starts_with(b"\r\n\r\n") {
+            return Some(position + 4);
         }
     }
-    candidates.extend([
-        "codex".to_string(),
-        "/opt/homebrew/bin/codex".to_string(),
-        "/usr/local/bin/codex".to_string(),
-        "/home/linuxbrew/.linuxbrew/bin/codex".to_string(),
-    ]);
+    None
+}
 
-    let mut errors = Vec::new();
-    for executable in candidates {
-        let result = Command::new(&executable)
-            .args(["app-server", "--stdio"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn();
+fn parse_sse_event(event: &[u8]) -> Option<Result<Value, String>> {
+    let event = String::from_utf8_lossy(event);
+    let data = event
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|data| data.strip_prefix(' ').unwrap_or(data))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data = data.trim();
+    if data == "[DONE]" || data.is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::from_str(data)
+            .map_err(|error| format!("Codex returned invalid stream data: {error}")),
+    )
+}
 
-        match result {
-            Ok(child) => return Ok(child),
-            Err(error) => errors.push(format!("{executable}: {error}")),
+fn handle_stream_event(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    event: &Value,
+    emitted_text: &mut bool,
+    pending_function_calls: &mut HashMap<String, PendingFunctionCall>,
+    emitted_tool_calls: &mut HashSet<String>,
+) -> Option<TurnResult> {
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if event_type == "response.completed" {
+        return Some(TurnResult::Completed);
+    }
+    if event_type == "response.failed" || event_type == "error" {
+        let error = event
+            .get("error")
+            .and_then(|value| value.get("message").or(Some(value)))
+            .and_then(Value::as_str)
+            .unwrap_or("Codex returned an error")
+            .to_string();
+        return Some(TurnResult::Failed(error));
+    }
+    if event_type == "response.incomplete" {
+        let reason = event
+            .get("response")
+            .and_then(|response| response.get("incomplete_details"))
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown reason");
+        return Some(TurnResult::Failed(format!(
+            "Codex response was incomplete: {reason}"
+        )));
+    }
+
+    if event_type == "response.output_text.delta" {
+        if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+            *emitted_text = true;
+            emit_turn_delta(app, handle, delta.to_string(), None);
+        }
+    } else if event_type == "response.output_text.done" && !*emitted_text {
+        if let Some(text) = event.get("text").and_then(Value::as_str) {
+            *emitted_text = true;
+            emit_turn_delta(app, handle, text.to_string(), None);
+        }
+    } else if event_type.contains("reasoning") && event_type.ends_with(".delta") {
+        if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+            emit_turn_delta(app, handle, String::new(), Some(delta.to_string()));
         }
     }
 
-    Err(format!(
-        "Could not start Codex app-server. Install the Codex CLI or set CODEX_BIN. Attempts: {}",
-        errors.join("; ")
-    ))
+    if event_type == "response.output_item.added" {
+        if let Some(item) = event.get("item") {
+            remember_function_call(item, pending_function_calls);
+        }
+    } else if event_type == "response.function_call_arguments.delta" {
+        if let (Some(item_id), Some(delta)) = (
+            event.get("item_id").and_then(Value::as_str),
+            event.get("delta").and_then(Value::as_str),
+        ) {
+            if let Some(call) = pending_function_calls.get_mut(item_id) {
+                call.arguments.push_str(delta);
+            }
+        }
+    } else if event_type == "response.function_call_arguments.done" {
+        if let Some(item_id) = event.get("item_id").and_then(Value::as_str) {
+            if let Some(call) = pending_function_calls.get_mut(item_id) {
+                if let Some(arguments) = event.get("arguments").and_then(Value::as_str) {
+                    call.arguments = arguments.to_string();
+                }
+                emit_function_call(app, handle, call, emitted_tool_calls);
+            }
+        }
+    } else if event_type == "response.output_item.done" {
+        if let Some(item) = event.get("item") {
+            if let Some(call) = remember_function_call(item, pending_function_calls) {
+                emit_function_call(app, handle, &call, emitted_tool_calls);
+            }
+        }
+    }
+
+    None
+}
+
+fn remember_function_call(
+    item: &Value,
+    pending_function_calls: &mut HashMap<String, PendingFunctionCall>,
+) -> Option<PendingFunctionCall> {
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return None;
+    }
+    let item_id = item.get("id").and_then(Value::as_str)?;
+    let id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or(item_id)
+        .to_string();
+    let name = item.get("name").and_then(Value::as_str)?.to_string();
+    let arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let call = PendingFunctionCall {
+        id,
+        name,
+        arguments,
+    };
+    pending_function_calls.insert(item_id.to_string(), call.clone());
+    Some(call)
+}
+
+fn emit_function_call(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    call: &PendingFunctionCall,
+    emitted_tool_calls: &mut HashSet<String>,
+) {
+    if !emitted_tool_calls.insert(call.id.clone()) {
+        return;
+    }
+    let input = serde_json::from_str(&call.arguments)
+        .unwrap_or_else(|_| Value::String(call.arguments.clone()));
+    emit_tool_call(
+        app,
+        handle,
+        CodexToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input,
+        },
+    );
+}
+
+fn emit_turn_delta(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    content: String,
+    reasoning: Option<String>,
+) {
+    emit_delta(app, handle, content, reasoning, None);
+}
+
+fn emit_tool_call(app: &AppHandle, handle: &CodexTurnHandle, tool_call: CodexToolCall) {
+    emit_delta(app, handle, String::new(), None, Some(tool_call));
+}
+
+fn emit_delta(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    content: String,
+    reasoning: Option<String>,
+    tool_call: Option<CodexToolCall>,
+) {
+    let _ = app.emit(
+        "codex-turn-delta",
+        CodexTurnDelta {
+            thread_id: handle.thread_id.clone(),
+            turn_id: handle.turn_id.clone(),
+            content,
+            reasoning,
+            tool_call,
+        },
+    );
+}
+
+fn emit_turn_completed(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    status: String,
+    error: Option<String>,
+) {
+    let _ = app.emit(
+        "codex-turn-completed",
+        CodexTurnCompleted {
+            thread_id: handle.thread_id.clone(),
+            turn_id: handle.turn_id.clone(),
+            status,
+            error,
+        },
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_notification, build_request, dynamic_tool_call, dynamic_tool_result,
-        normalize_dynamic_tools,
+        build_turn_body, normalize_tool_choice, normalize_tools, parse_sse_event, take_sse_event,
+        wire_reasoning_effort,
     };
     use serde_json::json;
 
     #[test]
-    fn builds_json_rpc_request() {
-        assert_eq!(
-            build_request(7, "model/list", json!({ "limit": 20 })),
-            json!({
-                "method": "model/list",
-                "id": 7,
-                "params": { "limit": 20 }
-            })
+    fn builds_conservative_codex_responses_body() {
+        let body = build_turn_body(
+            "gpt-5.6-terra",
+            "system",
+            "hello",
+            "high",
+            None,
+            None,
+            None,
+            None,
         );
+        assert_eq!(body["model"], "gpt-5.6-terra");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["include"][0], "reasoning.encrypted_content");
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]
-    fn builds_json_rpc_notification_without_an_id() {
-        assert_eq!(
-            build_notification("initialized", json!({})),
-            json!({ "method": "initialized", "params": {} })
+    fn adds_json_schema_format_when_requested() {
+        let body = build_turn_body(
+            "gpt-5.6-luna",
+            "system",
+            "hello",
+            "none",
+            Some(json!({ "type": "object" })),
+            None,
+            None,
+            None,
         );
+        assert_eq!(body["text"]["format"]["type"], "json_schema");
+        assert_eq!(body["include"], json!([]));
     }
 
     #[test]
-    fn parses_account_state_from_app_server_response() {
-        let account: super::CodexAccountState = serde_json::from_value(json!({
-            "account": {
-                "type": "chatgpt",
-                "email": "writer@example.com",
-                "planType": "plus"
-            },
-            "requiresOpenaiAuth": true
-        }))
-        .expect("account response should parse");
+    fn parses_text_delta_sse_event() {
+        let event = parse_sse_event(
+            br#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Hi"}
 
-        assert_eq!(
-            account
-                .account
-                .expect("account should be present")
-                .auth_mode,
-            "chatgpt"
-        );
-        assert!(account.requires_openai_auth);
+"#,
+        )
+        .expect("data line should produce an event")
+        .expect("event should be valid JSON");
+        assert_eq!(event["delta"], "Hi");
     }
 
     #[test]
-    fn parses_model_capabilities_from_app_server_response() {
-        let page: super::CodexModelListPage = serde_json::from_value(json!({
-            "data": [{
-                "id": "gpt-5.6-sol",
-                "model": "gpt-5.6-sol",
-                "displayName": "GPT-5.6-Sol",
-                "hidden": false,
-                "defaultReasoningEffort": "low",
-                "supportedReasoningEfforts": [{
-                    "reasoningEffort": "max",
-                    "description": "Highest effort"
-                }],
-                "inputModalities": ["text", "image"],
-                "isDefault": true
-            }],
-            "nextCursor": null
-        }))
-        .expect("model response should parse");
+    fn consumes_multiple_sse_events_from_one_buffer() {
+        let mut buffer = br#"data: {"type":"response.output_text.delta","delta":"Hi"}
 
-        assert_eq!(page.data[0].id, "gpt-5.6-sol");
-        assert_eq!(
-            page.data[0].supported_reasoning_efforts[0].reasoning_effort,
-            "max"
-        );
-        assert!(page.next_cursor.is_none());
+data: {"type":"response.completed"}
+
+"#
+        .to_vec();
+
+        let first = take_sse_event(&mut buffer)
+            .expect("first event should be available")
+            .expect("first event should be valid JSON");
+        let second = take_sse_event(&mut buffer)
+            .expect("second event should be available")
+            .expect("second event should be valid JSON");
+
+        assert_eq!(first["delta"], "Hi");
+        assert_eq!(second["type"], "response.completed");
+        assert!(take_sse_event(&mut buffer).is_none());
     }
 
     #[test]
-    fn normalizes_dynamic_function_tools() {
-        let tools = normalize_dynamic_tools(Some(json!([{
+    fn joins_multiline_sse_data() {
+        let event = parse_sse_event(
+            br#"data: {"type":"response.output_text.delta",
+data: "delta":"Hi"}
+
+"#,
+        )
+        .expect("data event should be available")
+        .expect("multiline data should be valid JSON");
+
+        assert_eq!(event["delta"], "Hi");
+    }
+
+    #[test]
+    fn maps_unsupported_efforts_to_supported_wire_values() {
+        assert_eq!(wire_reasoning_effort("minimal"), Some("low"));
+        assert_eq!(wire_reasoning_effort("xhigh"), Some("high"));
+        assert_eq!(wire_reasoning_effort("none"), None);
+    }
+
+    #[test]
+    fn converts_ai_sdk_function_tools_to_responses_tools() {
+        let tools = normalize_tools(Some(json!([{
             "type": "function",
             "name": "lookup",
             "description": "Look something up",
-            "inputSchema": { "type": "object" },
-            "providerOptions": { "internal": true }
+            "inputSchema": { "type": "object" }
         }])))
         .expect("function tool should be retained");
-
-        assert_eq!(tools[0]["name"], "lookup");
-        assert_eq!(tools[0]["inputSchema"]["type"], "object");
-        assert!(tools[0].get("providerOptions").is_none());
+        assert_eq!(tools[0]["parameters"]["type"], "object");
+        assert_eq!(tools[0]["strict"], false);
+        assert!(tools[0].get("inputSchema").is_none());
     }
 
     #[test]
-    fn maps_dynamic_tool_lifecycle_items() {
-        let item = json!({
-            "type": "dynamicToolCall",
-            "id": "call_123",
-            "tool": "lookup",
-            "arguments": { "id": "ABC-123" },
-            "status": "completed",
-            "success": true,
-            "contentItems": [{ "type": "inputText", "text": "open" }]
-        });
-        let call = dynamic_tool_call(&item).expect("dynamic call should parse");
-        let result = dynamic_tool_result(&item).expect("dynamic result should parse");
-
-        assert_eq!(call.id, "call_123");
-        assert_eq!(call.input["id"], "ABC-123");
-        assert_eq!(result.result[0]["text"], "open");
-        assert!(!result.is_error);
+    fn converts_ai_sdk_tool_choice_to_responses_tool_choice() {
+        assert_eq!(
+            normalize_tool_choice(Some(json!({ "type": "auto" }))),
+            Some(json!("auto"))
+        );
+        assert_eq!(
+            normalize_tool_choice(Some(json!({ "type": "tool", "toolName": "lookup" }))),
+            Some(json!({ "type": "function", "name": "lookup" }))
+        );
     }
 }

@@ -5,7 +5,6 @@ import type {
   LanguageModelV4StreamPart,
   LanguageModelV4Usage,
 } from '@ai-sdk/provider'
-import type { ProviderType } from '$lib/types'
 import {
   codexService,
   type CodexToolCall,
@@ -13,12 +12,9 @@ import {
   type CodexToolResult,
   type CodexTurnRequest,
 } from '$lib/services/codex'
-import { codexDirectService } from '$lib/services/codexDirect'
 
 interface CodexTransport {
-  streamTurn(
-    request: CodexTurnRequest,
-  ): AsyncIterable<{
+  streamTurn(request: CodexTurnRequest): AsyncIterable<{
     content: string
     reasoning: string | null
     toolCall?: CodexToolCall
@@ -169,16 +165,12 @@ function functionTools(options: LanguageModelV4CallOptions): unknown[] | undefin
   return tools?.length ? tools : undefined
 }
 
-function getTransport(providerType: ProviderType): CodexTransport {
-  return providerType === 'openai-codex' ? codexService : codexDirectService
-}
-
 export function createCodexLanguageModel(
-  providerType: 'openai-codex' | 'openai-codex-direct',
+  providerType: 'openai-codex',
   modelId: string,
   toolExecutor?: CodexToolExecutor,
 ): LanguageModelV4 {
-  const transport = getTransport(providerType)
+  const transport: CodexTransport = codexService
 
   function buildRequest(options: LanguageModelV4CallOptions): CodexTurnRequest {
     const { system, prompt, input } = buildPrompt(options.prompt)
