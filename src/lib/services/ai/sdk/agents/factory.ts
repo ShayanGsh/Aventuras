@@ -147,7 +147,6 @@ export function createAgentFromPreset<TTools extends ToolSet>(
   const { preset, providerType, model, providerOptions, reasoning } = resolveAgentConfig(
     presetId,
     serviceId,
-    undefined,
   )
 
   log('createAgentFromPreset', {
@@ -217,7 +216,6 @@ export function createStreamingAgenticAssistant<TTools extends ToolSet>(
   const { preset, providerType, model, providerOptions, reasoning } = resolveAgentConfig(
     presetId,
     serviceId,
-    undefined,
   )
 
   log('createStreamingAgenticAssistant', {

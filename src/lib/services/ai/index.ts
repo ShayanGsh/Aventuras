@@ -737,9 +737,7 @@ class AIService {
       return false
     }
     const mode = timelineFillSettings.mode ?? 'static'
-    if (mode !== 'agentic') return false
-
-    return true
+    return mode === 'agentic'
   }
 
   /**
