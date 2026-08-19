@@ -130,7 +130,8 @@ export function buildProviderOptions(
         options = { reasoningEffort: reasoning_effort }
         break
       case 'openai-codex':
-        // Codex turns receive reasoning effort through the native transport params.
+        // Preserve the configured value, including `max`, for the native transport.
+        options = { reasoningEffort: preset.reasoningEffort }
         break
       case 'pollinations':
         options = {
@@ -281,7 +282,8 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     manualBody: settings.apiSettings.manualBody ?? '',
   })
 
-  const reasoningEffort = normalizeSdkReasoningEffort(settings.apiSettings.reasoningEffort)
+  const configuredReasoningEffort = settings.apiSettings.reasoningEffort
+  const reasoning = normalizeSdkReasoningEffort(configuredReasoningEffort)
 
   const narrativePreset: GenerationPreset = {
     id: '_narrative',
@@ -291,7 +293,7 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     model: baseModelId,
     temperature: settings.apiSettings.temperature,
     maxTokens: settings.apiSettings.maxTokens,
-    reasoningEffort: reasoningEffort,
+    reasoningEffort: configuredReasoningEffort,
     manualBody: settings.apiSettings.manualBody ?? '',
   }
 
@@ -306,7 +308,7 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     temperature: settings.apiSettings.temperature,
     maxTokens: settings.apiSettings.maxTokens,
     providerOptions: buildProviderOptions(narrativePreset, profile.providerType),
-    reasoning: reasoningEffort,
+    reasoning,
     useThinkTag,
   }
 }
@@ -414,6 +416,9 @@ export async function generateStructured<T extends z.ZodType>(
       system,
       prompt,
       reasoningEffort: selectedPreset.reasoningEffort,
+      maxOutputTokens: !settings.advancedRequestSettings.manualMode
+        ? selectedPreset.maxTokens
+        : undefined,
       outputSchema: z.toJSONSchema(schema),
       signal,
     })
@@ -473,6 +478,9 @@ export async function generatePlainText(
       system,
       prompt,
       reasoningEffort: selectedPreset.reasoningEffort,
+      maxOutputTokens: !settings.advancedRequestSettings.manualMode
+        ? selectedPreset.maxTokens
+        : undefined,
       signal,
     })
   }
@@ -651,6 +659,9 @@ export async function generateNarrative(options: NarrativeGenerateOptions): Prom
       system,
       prompt,
       reasoningEffort: settings.apiSettings.reasoningEffort,
+      maxOutputTokens: !settings.advancedRequestSettings.manualMode
+        ? settings.apiSettings.maxTokens
+        : undefined,
       signal,
     })
   }

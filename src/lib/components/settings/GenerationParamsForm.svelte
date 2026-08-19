@@ -115,8 +115,8 @@
     const raw = parseInt((e.currentTarget as HTMLInputElement).value, 10)
     if (isNaN(raw) || raw < 256) {
       numericValue.value = 256
-    } else if (raw > 262144) {
-      numericValue.value = 262144
+    } else if (raw > maxOutputTokenLimit) {
+      numericValue.value = maxOutputTokenLimit
     }
   }
 
@@ -136,6 +136,14 @@
   // ============================================================================
 
   let effectiveProfileId = $derived(profileId || settings.getDefaultProfileIdForProvider())
+  let isCodexProvider = $derived(
+    settings.getProfile(effectiveProfileId)?.providerType === 'openai-codex',
+  )
+  const GENERAL_MAX_OUTPUT_TOKENS = 262144
+  const CODEX_MAX_OUTPUT_TOKENS = 128000
+  let maxOutputTokenLimit = $derived(
+    isCodexProvider ? CODEX_MAX_OUTPUT_TOKENS : GENERAL_MAX_OUTPUT_TOKENS,
+  )
 
   const REASONING_LEVELS: ReasoningEffort[] = [
     'none',
@@ -166,6 +174,11 @@
   }
 
   let reasoningValue = $derived(getReasoningIndex(reasoningEffort))
+
+  $effect(() => {
+    const limit = maxOutputTokenLimit
+    if (maxTokens > limit) onMaxTokensChange(limit)
+  })
 
   let modelReasoningCapability = $derived.by<'enforced' | 'supported' | 'unsupported'>(() => {
     const profile = settings.getProfile(effectiveProfileId)
@@ -258,28 +271,31 @@
   <div
     class={cn(
       'grid grid-cols-1 gap-6 border-t pt-4 md:grid-cols-2',
+      isCodexProvider && 'md:grid-cols-1',
       isManualMode && 'pointer-events-none opacity-50',
     )}
   >
-    <!-- Temperature -->
-    <div class="grid gap-4">
-      <div class="flex justify-between">
-        <Label>Temperature</Label>
-        <span class="text-muted-foreground text-xs">{temperature.toFixed(2)}</span>
+    <!-- Temperature is not supported by the OAuth-backed Responses transport. -->
+    {#if !isCodexProvider}
+      <div class="grid gap-4">
+        <div class="flex justify-between">
+          <Label>Temperature</Label>
+          <span class="text-muted-foreground text-xs">{temperature.toFixed(2)}</span>
+        </div>
+        <Slider
+          value={temperature}
+          type="single"
+          min={0}
+          max={2}
+          step={0.05}
+          onValueChange={onTemperatureChange}
+        />
+        <div class="text-muted-foreground flex justify-between text-xs">
+          <span>Focused</span>
+          <span>Creative</span>
+        </div>
       </div>
-      <Slider
-        value={temperature}
-        type="single"
-        min={0}
-        max={2}
-        step={0.05}
-        onValueChange={onTemperatureChange}
-      />
-      <div class="text-muted-foreground flex justify-between text-xs">
-        <span>Focused</span>
-        <span>Creative</span>
-      </div>
-    </div>
+    {/if}
 
     <!-- Max Output Tokens -->
     <div class="grid gap-4">
@@ -349,14 +365,14 @@
           class="h-8 w-full text-left"
           value={numericValue.value}
           min={256}
-          max={262144}
+          max={maxOutputTokenLimit}
           step={256}
           oninput={handleNumericInput}
           onblur={handleNumericBlur}
-          placeholder="256 – 262144"
+          placeholder={`256 – ${maxOutputTokenLimit.toLocaleString()}`}
         />
         <p class="text-muted-foreground text-[10px]">
-          Expert override: accepts any value from 256 to 262,144
+          Expert override: accepts any value from 256 to {maxOutputTokenLimit.toLocaleString()}
         </p>
       {/if}
     </div>

@@ -80,6 +80,7 @@ export interface CodexTurnRequest {
   prompt: string
   input?: unknown[]
   reasoningEffort: string
+  maxOutputTokens?: number
   outputSchema?: unknown
   tools?: unknown[]
   toolChoice?: unknown
@@ -124,6 +125,7 @@ class CodexService {
       prompt: request.prompt,
       input: request.input ?? null,
       reasoningEffort: request.reasoningEffort,
+      maxOutputTokens: request.maxOutputTokens ?? null,
       outputSchema: request.outputSchema ?? null,
       tools: request.tools ?? null,
       toolChoice: request.toolChoice ?? null,

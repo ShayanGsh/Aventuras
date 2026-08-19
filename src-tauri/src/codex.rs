@@ -28,6 +28,7 @@ const TOKEN_REFRESH_SKEW_SECONDS: i64 = 120;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_OUTPUT_TOKENS: u32 = 128_000;
 
 #[derive(Default, Clone)]
 pub struct CodexState {
@@ -604,6 +605,7 @@ pub async fn codex_turn_start(
     system: String,
     prompt: String,
     reasoning_effort: String,
+    max_output_tokens: Option<u32>,
     output_schema: Option<Value>,
     input: Option<Value>,
     tools: Option<Value>,
@@ -634,6 +636,7 @@ pub async fn codex_turn_start(
             &system,
             &prompt,
             &reasoning_effort,
+            max_output_tokens,
             output_schema,
             input,
             tools,
@@ -686,6 +689,7 @@ async fn run_turn(
     system: &str,
     prompt: &str,
     reasoning_effort: &str,
+    max_output_tokens: Option<u32>,
     output_schema: Option<Value>,
     input: Option<Value>,
     tools: Option<Value>,
@@ -697,6 +701,7 @@ async fn run_turn(
         system,
         prompt,
         reasoning_effort,
+        max_output_tokens,
         output_schema,
         input,
         tools,
@@ -796,6 +801,7 @@ fn build_turn_body(
     system: &str,
     prompt: &str,
     reasoning_effort: &str,
+    max_output_tokens: Option<u32>,
     output_schema: Option<Value>,
     input: Option<Value>,
     tools: Option<Value>,
@@ -827,6 +833,10 @@ fn build_turn_body(
             body["include"] = json!(["reasoning.encrypted_content"]);
         }
         None => body["include"] = json!([]),
+    }
+
+    if let Some(max_output_tokens) = max_output_tokens {
+        body["max_output_tokens"] = json!(max_output_tokens.clamp(1, MAX_OUTPUT_TOKENS));
     }
 
     if let Some(schema) = output_schema {
@@ -1179,6 +1189,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(body["model"], "gpt-5.6-terra");
         assert_eq!(body["stream"], true);
@@ -1195,6 +1206,7 @@ mod tests {
             "system",
             "hello",
             "none",
+            None,
             Some(json!({ "type": "object" })),
             None,
             None,
@@ -1202,6 +1214,23 @@ mod tests {
         );
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["include"], json!([]));
+    }
+
+    #[test]
+    fn caps_output_tokens_to_the_supported_responses_limit() {
+        let body = build_turn_body(
+            "gpt-5.6-luna",
+            "system",
+            "hello",
+            "medium",
+            Some(200_000),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(body["max_output_tokens"], 128_000);
     }
 
     #[test]

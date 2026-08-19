@@ -311,6 +311,9 @@ export class NarrativeService {
           system: systemPrompt,
           prompt,
           reasoningEffort: settings.apiSettings.reasoningEffort,
+          maxOutputTokens: !settings.advancedRequestSettings.manualMode
+            ? settings.apiSettings.maxTokens
+            : undefined,
           signal,
         })) {
           if (part.reasoning) yield { content: '', reasoning: part.reasoning, done: false }
@@ -385,6 +388,9 @@ export class NarrativeService {
         system: systemPrompt,
         prompt,
         reasoningEffort: settings.apiSettings.reasoningEffort,
+        maxOutputTokens: !settings.advancedRequestSettings.manualMode
+          ? settings.apiSettings.maxTokens
+          : undefined,
         signal,
       })
     }

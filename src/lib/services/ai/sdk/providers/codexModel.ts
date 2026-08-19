@@ -192,6 +192,9 @@ export function buildPrompt(prompt: LanguageModelV4Prompt): {
 }
 
 function reasoningEffort(options: LanguageModelV4CallOptions): string {
+  const providerEffort = options.providerOptions?.openaiCodex?.reasoningEffort
+  if (typeof providerEffort === 'string') return providerEffort
+
   const effort = options.reasoning
   return effort && effort !== 'provider-default' ? effort : 'medium'
 }
@@ -231,6 +234,7 @@ export function createCodexLanguageModel(
       prompt,
       input,
       reasoningEffort: reasoningEffort(options),
+      maxOutputTokens: options.maxOutputTokens,
       outputSchema: outputSchema(options),
       tools: functionTools(options),
       toolChoice: options.toolChoice,

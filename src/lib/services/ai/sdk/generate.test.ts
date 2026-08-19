@@ -102,6 +102,14 @@ describe('buildProviderOptions', () => {
     expect(result).toEqual({ llamacpp: { reasoningEffort: 'none' } })
   })
 
+  it('preserves Codex max reasoning for the native transport', () => {
+    expect(buildProviderOptions({ ...basePreset, reasoningEffort: 'max' }, 'openai-codex')).toEqual(
+      {
+        openaiCodex: { reasoningEffort: 'max' },
+      },
+    )
+  })
+
   it('looks up hyphenated providers under the camelCase key the SDK prefers', () => {
     expect(buildProviderOptions({ ...basePreset, reasoningEffort: 'low' }, 'nvidia-nim')).toEqual({
       nvidiaNim: { reasoningEffort: 'low' },
