@@ -231,7 +231,6 @@ export function createCodexLanguageModel(
       prompt,
       input,
       reasoningEffort: reasoningEffort(options),
-      maxOutputTokens: options.maxOutputTokens,
       outputSchema: outputSchema(options),
       tools: functionTools(options),
       toolChoice: options.toolChoice,

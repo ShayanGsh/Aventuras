@@ -140,10 +140,7 @@
     settings.getProfile(effectiveProfileId)?.providerType === 'openai-codex',
   )
   const GENERAL_MAX_OUTPUT_TOKENS = 262144
-  const CODEX_MAX_OUTPUT_TOKENS = 128000
-  let maxOutputTokenLimit = $derived(
-    isCodexProvider ? CODEX_MAX_OUTPUT_TOKENS : GENERAL_MAX_OUTPUT_TOKENS,
-  )
+  const maxOutputTokenLimit = GENERAL_MAX_OUTPUT_TOKENS
 
   const REASONING_LEVELS: ReasoningEffort[] = [
     'none',
@@ -271,12 +268,15 @@
   <div
     class={cn(
       'grid grid-cols-1 gap-6 border-t pt-4 md:grid-cols-2',
-      isCodexProvider && 'md:grid-cols-1',
       isManualMode && 'pointer-events-none opacity-50',
     )}
   >
-    <!-- Temperature is not supported by the OAuth-backed Responses transport. -->
-    {#if !isCodexProvider}
+    {#if isCodexProvider}
+      <p class="text-muted-foreground text-xs">
+        The OAuth-backed Codex transport does not accept temperature or output-token limits.
+      </p>
+    {:else}
+      <!-- Temperature -->
       <div class="grid gap-4">
         <div class="flex justify-between">
           <Label>Temperature</Label>
@@ -295,87 +295,89 @@
           <span>Creative</span>
         </div>
       </div>
-    {/if}
 
-    <!-- Max Output Tokens -->
-    <div class="grid gap-4">
-      <div class="flex items-center justify-between">
-        <div class="grid gap-0.5">
-          <Label>Max Output Tokens</Label>
-          <span class="text-muted-foreground text-[10px] leading-tight">
-            Includes reasoning + response tokens
-          </span>
-        </div>
-        <div class="flex items-center gap-1.5">
-          {#if isTokenManualOverride || showNumericOverride}
-            <span
-              class="text-muted-foreground rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+      <!-- Max Output Tokens -->
+      <div class="grid gap-4">
+        <div class="flex items-center justify-between">
+          <div class="grid gap-0.5">
+            <Label>Max Output Tokens</Label>
+            <span class="text-muted-foreground text-[10px] leading-tight">
+              Includes reasoning + response tokens
+            </span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            {#if isTokenManualOverride || showNumericOverride}
+              <span
+                class="text-muted-foreground rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              >
+                Manual
+              </span>
+            {:else}
+              <span class="text-muted-foreground text-xs">
+                {maxTokens.toLocaleString()}
+              </span>
+            {/if}
+            <button
+              type="button"
+              onclick={toggleNumericOverride}
+              class={cn(
+                'rounded p-0.5 transition-colors',
+                showNumericOverride
+                  ? 'text-primary'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+              title={showNumericOverride
+                ? 'Close manual override (snap to slider)'
+                : 'Set exact value (expert)'}
             >
-              Manual
-            </span>
-          {:else}
-            <span class="text-muted-foreground text-xs">
-              {maxTokens.toLocaleString()}
-            </span>
-          {/if}
-          <button
-            type="button"
-            onclick={toggleNumericOverride}
-            class={cn(
-              'rounded p-0.5 transition-colors',
-              showNumericOverride ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
-            )}
-            title={showNumericOverride
-              ? 'Close manual override (snap to slider)'
-              : 'Set exact value (expert)'}
-          >
-            <Settings2 class="h-3.5 w-3.5" />
-          </button>
+              <Settings2 class="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
-      </div>
 
-      <!-- Slider (disabled/dimmed when override is active) -->
-      <div
-        class={cn(
-          'transition-opacity',
-          (showNumericOverride || isTokenManualOverride) && 'pointer-events-none opacity-40',
-        )}
-      >
-        <Slider
-          value={tokenSliderIndex}
-          type="single"
-          min={0}
-          max={TOKEN_STEPS.length - 1}
-          step={1}
-          onValueChange={handleSliderTokenChange}
-        />
-        <div class="text-muted-foreground relative mt-1 h-4 text-xs">
-          <span class="absolute left-0">1K</span>
-          <span class="absolute -translate-x-1/2" style="left: 20%">4K</span>
-          <span class="absolute -translate-x-1/2" style="left: 46.67%">8K</span>
-          <span class="absolute -translate-x-1/2" style="left: 73.33%">16K</span>
-          <span class="absolute right-0">32K</span>
+        <!-- Slider (disabled/dimmed when override is active) -->
+        <div
+          class={cn(
+            'transition-opacity',
+            (showNumericOverride || isTokenManualOverride) && 'pointer-events-none opacity-40',
+          )}
+        >
+          <Slider
+            value={tokenSliderIndex}
+            type="single"
+            min={0}
+            max={TOKEN_STEPS.length - 1}
+            step={1}
+            onValueChange={handleSliderTokenChange}
+          />
+          <div class="text-muted-foreground relative mt-1 h-4 text-xs">
+            <span class="absolute left-0">1K</span>
+            <span class="absolute -translate-x-1/2" style="left: 20%">4K</span>
+            <span class="absolute -translate-x-1/2" style="left: 46.67%">8K</span>
+            <span class="absolute -translate-x-1/2" style="left: 73.33%">16K</span>
+            <span class="absolute right-0">32K</span>
+          </div>
         </div>
-      </div>
 
-      <!-- Numeric override input (collapsible) -->
-      {#if showNumericOverride || isTokenManualOverride}
-        <Input
-          type="number"
-          class="h-8 w-full text-left"
-          value={numericValue.value}
-          min={256}
-          max={maxOutputTokenLimit}
-          step={256}
-          oninput={handleNumericInput}
-          onblur={handleNumericBlur}
-          placeholder={`256 – ${maxOutputTokenLimit.toLocaleString()}`}
-        />
-        <p class="text-muted-foreground text-[10px]">
-          Expert override: accepts any value from 256 to {maxOutputTokenLimit.toLocaleString()}
-        </p>
-      {/if}
-    </div>
+        <!-- Numeric override input (collapsible) -->
+        {#if showNumericOverride || isTokenManualOverride}
+          <Input
+            type="number"
+            class="h-8 w-full text-left"
+            value={numericValue.value}
+            min={256}
+            max={maxOutputTokenLimit}
+            step={256}
+            oninput={handleNumericInput}
+            onblur={handleNumericBlur}
+            placeholder={`256 – ${maxOutputTokenLimit.toLocaleString()}`}
+          />
+          <p class="text-muted-foreground text-[10px]">
+            Expert override: accepts any value from 256 to {maxOutputTokenLimit.toLocaleString()}
+          </p>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <!-- Thinking / Reasoning row (shown only when provider+model supports it) -->

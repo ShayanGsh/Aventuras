@@ -417,9 +417,6 @@ export async function generateStructured<T extends z.ZodType>(
       system,
       prompt,
       reasoningEffort: selectedPreset.reasoningEffort,
-      maxOutputTokens: !settings.advancedRequestSettings.manualMode
-        ? selectedPreset.maxTokens
-        : undefined,
       outputSchema: z.toJSONSchema(schema),
       signal,
     })
@@ -479,9 +476,6 @@ export async function generatePlainText(
       system,
       prompt,
       reasoningEffort: selectedPreset.reasoningEffort,
-      maxOutputTokens: !settings.advancedRequestSettings.manualMode
-        ? selectedPreset.maxTokens
-        : undefined,
       signal,
     })
   }
@@ -660,9 +654,6 @@ export async function generateNarrative(options: NarrativeGenerateOptions): Prom
       system,
       prompt,
       reasoningEffort: settings.apiSettings.reasoningEffort,
-      maxOutputTokens: !settings.advancedRequestSettings.manualMode
-        ? settings.apiSettings.maxTokens
-        : undefined,
       signal,
     })
   }
