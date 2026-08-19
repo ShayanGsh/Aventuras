@@ -726,21 +726,21 @@ async fn run_turn(
     }
 
     if !buffer.is_empty() {
-        if let Some(event) = parse_sse_line(&buffer) {
-            match event {
-                Ok(event) => {
-                    if let Some(result) = handle_stream_event(
-                        app,
-                        handle,
-                        &event,
-                        &mut emitted_text,
-                        &mut pending_function_calls,
-                        &mut emitted_tool_calls,
-                    ) {
-                        return result;
-                    }
-                }
+        buffer.extend_from_slice(b"\n\n");
+        while let Some(event) = take_sse_event(&mut buffer) {
+            let event = match event {
+                Ok(event) => event,
                 Err(error) => return TurnResult::Failed(error),
+            };
+            if let Some(result) = handle_stream_event(
+                app,
+                handle,
+                &event,
+                &mut emitted_text,
+                &mut pending_function_calls,
+                &mut emitted_tool_calls,
+            ) {
+                return result;
             }
         }
     }
@@ -859,14 +859,37 @@ fn wire_reasoning_effort(effort: &str) -> Option<&'static str> {
 }
 
 fn take_sse_event(buffer: &mut Vec<u8>) -> Option<Result<Value, String>> {
-    let newline = buffer.iter().position(|byte| *byte == b'\n')?;
-    let line = buffer.drain(..=newline).collect::<Vec<_>>();
-    parse_sse_line(&line)
+    loop {
+        let event_end = find_sse_event_end(buffer)?;
+        let event = buffer.drain(..event_end).collect::<Vec<_>>();
+        if let Some(event) = parse_sse_event(&event) {
+            return Some(event);
+        }
+    }
 }
 
-fn parse_sse_line(line: &[u8]) -> Option<Result<Value, String>> {
-    let line = String::from_utf8_lossy(line).trim().to_string();
-    let data = line.strip_prefix("data:")?.trim();
+fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
+    for position in 0..buffer.len() {
+        let remaining = &buffer[position..];
+        if remaining.starts_with(b"\n\n") {
+            return Some(position + 2);
+        }
+        if remaining.starts_with(b"\r\n\r\n") {
+            return Some(position + 4);
+        }
+    }
+    None
+}
+
+fn parse_sse_event(event: &[u8]) -> Option<Result<Value, String>> {
+    let event = String::from_utf8_lossy(event);
+    let data = event
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|data| data.strip_prefix(' ').unwrap_or(data))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data = data.trim();
     if data == "[DONE]" || data.is_empty() {
         return None;
     }
@@ -1064,7 +1087,7 @@ fn emit_turn_completed(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_turn_body, normalize_tool_choice, normalize_tools, parse_sse_line,
+        build_turn_body, normalize_tool_choice, normalize_tools, parse_sse_event, take_sse_event,
         wire_reasoning_effort,
     };
     use serde_json::json;
@@ -1106,10 +1129,50 @@ mod tests {
     }
 
     #[test]
-    fn parses_text_delta_sse_line() {
-        let event = parse_sse_line(br#"data: {"type":"response.output_text.delta","delta":"Hi"}"#)
-            .expect("data line should produce an event")
-            .expect("event should be valid JSON");
+    fn parses_text_delta_sse_event() {
+        let event = parse_sse_event(
+            br#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"Hi"}
+
+"#,
+        )
+        .expect("data line should produce an event")
+        .expect("event should be valid JSON");
+        assert_eq!(event["delta"], "Hi");
+    }
+
+    #[test]
+    fn consumes_multiple_sse_events_from_one_buffer() {
+        let mut buffer = br#"data: {"type":"response.output_text.delta","delta":"Hi"}
+
+data: {"type":"response.completed"}
+
+"#
+        .to_vec();
+
+        let first = take_sse_event(&mut buffer)
+            .expect("first event should be available")
+            .expect("first event should be valid JSON");
+        let second = take_sse_event(&mut buffer)
+            .expect("second event should be available")
+            .expect("second event should be valid JSON");
+
+        assert_eq!(first["delta"], "Hi");
+        assert_eq!(second["type"], "response.completed");
+        assert!(take_sse_event(&mut buffer).is_none());
+    }
+
+    #[test]
+    fn joins_multiline_sse_data() {
+        let event = parse_sse_event(
+            br#"data: {"type":"response.output_text.delta",
+data: "delta":"Hi"}
+
+"#,
+        )
+        .expect("data event should be available")
+        .expect("multiline data should be valid JSON");
+
         assert_eq!(event["delta"], "Hi");
     }
 
