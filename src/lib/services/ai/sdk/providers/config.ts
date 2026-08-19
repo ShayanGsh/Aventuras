@@ -319,7 +319,7 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
     capabilities: {
       textGeneration: true,
       imageGeneration: false,
-      structuredOutput: false,
+      structuredOutput: true,
       reasoning: true,
       modelCapabilityFetching: true,
     },

@@ -229,9 +229,10 @@ function resolveConfig(presetId: string, serviceId: string, debugId?: string): R
       break
     case 'auto':
       const capabilities = PROVIDERS[profile.providerType].capabilities
-      structuredOutputs = capabilities?.modelCapabilityFetching
-        ? !!fetchedModel?.structuredOutput
-        : (capabilities?.structuredOutput ?? true)
+      structuredOutputs =
+        capabilities?.modelCapabilityFetching && fetchedModel?.structuredOutput !== undefined
+          ? fetchedModel.structuredOutput
+          : (capabilities?.structuredOutput ?? true)
       break
   }
 

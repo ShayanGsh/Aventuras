@@ -16,6 +16,7 @@ vi.mock('$lib/stores/debug.svelte', () => ({
 }))
 
 import { buildProviderOptions } from './generate'
+import { PROVIDERS } from './providers/config'
 import type { GenerationPreset } from '$lib/types'
 
 describe('buildProviderOptions', () => {
@@ -121,5 +122,11 @@ describe('buildProviderOptions', () => {
     expect(
       buildProviderOptions({ ...basePreset, reasoningEffort: 'medium' }, 'pollinations'),
     ).toEqual({ pollinations: { reasoning_effort: 'medium', parallel_tool_calls: true } })
+  })
+})
+
+describe('Codex capabilities', () => {
+  it('advertises the structured output supported by its Responses transport', () => {
+    expect(PROVIDERS['openai-codex'].capabilities.structuredOutput).toBe(true)
   })
 })
