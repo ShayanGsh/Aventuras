@@ -60,25 +60,10 @@ function mergeProfileModels(fetchedModels: TextModel[], customModels: string[]):
 }
 
 function migrateLegacyCodexProfile(profile: APIProfile): APIProfile {
-  const migrated = migrateCodexProvider({
+  return migrateCodexProvider({
     ...profile,
     providerType: profile.providerType as string,
   }) as APIProfile
-  const providerType = migrated.providerType
-  const hasKnownProvider = Object.prototype.hasOwnProperty.call(PROVIDERS, providerType)
-  const hasCredentials = !!migrated.apiKey?.trim() || !!migrated.baseUrl?.trim()
-  const hasModels =
-    (migrated.fetchedModels?.length ?? 0) > 0 || (migrated.customModels?.length ?? 0) > 0
-
-  if (!hasKnownProvider && !hasCredentials && hasModels) {
-    return {
-      ...migrated,
-      name: PROVIDERS['openai-codex'].name,
-      providerType: 'openai-codex',
-    }
-  }
-
-  return migrated
 }
 
 function normalizeProfile(profile: APIProfile): APIProfile {

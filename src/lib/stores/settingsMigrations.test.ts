@@ -33,6 +33,16 @@ describe('migrateCodexProvider', () => {
       providerType: 'openai-codex',
     })
   })
+
+  it('does not guess at unknown provider records', () => {
+    const unknown = {
+      ...profile,
+      providerType: 'future-provider',
+      customModels: ['model-from-a-future-version'],
+    }
+
+    expect(migrateCodexProvider(unknown)).toEqual(unknown)
+  })
 })
 
 interface MergedWorldState {
