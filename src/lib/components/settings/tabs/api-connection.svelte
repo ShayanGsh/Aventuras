@@ -47,6 +47,7 @@
   let openCollapsibles = $state<Set<string>>(new Set())
   let codexAccount = $state<CodexAccount | null>(null)
   let isCodexLoggingIn = $state(false)
+  let codexLoginId = $state<string | null>(null)
   let codexError = $state<string | null>(null)
   let codexUserCode = $state<string | null>(null)
   let unlistenCodexLogin: (() => void) | undefined
@@ -83,6 +84,7 @@
 
     try {
       const login = await codexService.startLogin()
+      codexLoginId = login.loginId
       codexUserCode = login.userCode || null
       const loginUrl = login.authUrl ?? login.verificationUrl
       if (!loginUrl) {
@@ -90,13 +92,31 @@
       }
       await openUrl(loginUrl)
     } catch (error) {
+      const loginId = codexLoginId
+      codexLoginId = null
+      if (loginId) await codexService.cancelLogin(loginId).catch(() => undefined)
       isCodexLoggingIn = false
+      codexError = formatCodexError(error)
+    }
+  }
+
+  async function handleCodexCancel() {
+    const loginId = codexLoginId
+    codexLoginId = null
+    isCodexLoggingIn = false
+    codexUserCode = null
+    if (!loginId) return
+
+    try {
+      await codexService.cancelLogin(loginId)
+    } catch (error) {
       codexError = formatCodexError(error)
     }
   }
 
   async function handleCodexLogout() {
     codexError = null
+    if (codexLoginId) await handleCodexCancel()
     try {
       await codexService.logout()
       codexAccount = null
@@ -130,6 +150,7 @@
   }
 
   function startNewProfile() {
+    if (codexLoginId) void handleCodexCancel()
     editingProfileId = crypto.randomUUID()
     isNewProfile = true
     formName = ''
@@ -146,6 +167,7 @@
   }
 
   function cancelEdit() {
+    if (codexLoginId) void handleCodexCancel()
     editingProfileId = null
     isNewProfile = false
     fetchError = null
@@ -266,6 +288,7 @@
       openCollapsibles = new SvelteSet(openCollapsibles)
 
       if (editingProfileId === profile.id) {
+        if (codexLoginId) void handleCodexCancel()
         flushAutoSave()
         editingProfileId = null
       }
@@ -349,11 +372,14 @@
 
   onDestroy(() => {
     mounted = false
+    if (codexLoginId) void codexService.cancelLogin(codexLoginId).catch(() => undefined)
     unlistenCodexLogin?.()
     flushAutoSave()
   })
 
   function handleCodexLoginCompleted(payload: CodexLoginCompleted) {
+    if (!codexLoginId || (payload.loginId && payload.loginId !== codexLoginId)) return
+    codexLoginId = null
     isCodexLoggingIn = false
     codexUserCode = null
     if (!payload.success) {
@@ -380,6 +406,7 @@
 
   // Fix #1: shared handler to avoid duplication between new-profile and edit forms
   function handleProviderTypeChange(v: ProviderType) {
+    if (!isCodexProvider(v) && codexLoginId) void handleCodexCancel()
     formProviderType = v
     formName = PROVIDERS[v].name
     formBaseUrl = ''
@@ -444,6 +471,7 @@
           {codexError}
           onFetchModels={handleFetchModels}
           onCodexLogin={handleCodexLogin}
+          onCodexCancel={handleCodexCancel}
           onCodexLogout={handleCodexLogout}
           onProviderTypeChange={handleProviderTypeChange}
           onRemoveFetchedModel={handleRemoveFetchedModel}
@@ -563,6 +591,7 @@
                 {codexError}
                 onFetchModels={handleFetchModels}
                 onCodexLogin={handleCodexLogin}
+                onCodexCancel={handleCodexCancel}
                 onCodexLogout={handleCodexLogout}
                 onProviderTypeChange={handleProviderTypeChange}
                 onRemoveFetchedModel={handleRemoveFetchedModel}

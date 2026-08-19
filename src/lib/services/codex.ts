@@ -90,6 +90,10 @@ class CodexService {
     return invoke('codex_login_start')
   }
 
+  async cancelLogin(loginId: string): Promise<void> {
+    return invoke('codex_login_cancel', { loginId })
+  }
+
   async logout(): Promise<void> {
     return invoke('codex_logout')
   }

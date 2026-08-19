@@ -33,6 +33,7 @@ const MAX_OUTPUT_TOKENS: u32 = 128_000;
 #[derive(Default, Clone)]
 pub struct CodexState {
     active_turns: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    active_logins: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,7 +392,10 @@ pub async fn codex_account_read(app: AppHandle) -> Result<CodexAccountState, Str
 }
 
 #[tauri::command]
-pub async fn codex_login_start(app: AppHandle) -> Result<CodexLoginStart, String> {
+pub async fn codex_login_start(
+    app: AppHandle,
+    state: State<'_, CodexState>,
+) -> Result<CodexLoginStart, String> {
     let client = http_client()?;
     let response = client
         .post(OAUTH_DEVICE_URL)
@@ -432,8 +436,18 @@ pub async fn codex_login_start(app: AppHandle) -> Result<CodexLoginStart, String
         .max(3);
     let login_id = device.device_auth_id.clone();
     let user_code = device.user_code.clone();
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    state
+        .active_logins
+        .lock()
+        .await
+        .insert(login_id.clone(), cancel_tx);
+    let state_for_login = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let result = complete_device_login(&app_for_login, &login_id, &user_code, interval).await;
+        let result = tokio::select! {
+            _ = cancel_rx => return,
+            result = complete_device_login(&app_for_login, &login_id, &user_code, interval) => result,
+        };
         let event = match result {
             Ok(()) => CodexLoginCompleted {
                 login_id: login_id.clone(),
@@ -447,9 +461,21 @@ pub async fn codex_login_start(app: AppHandle) -> Result<CodexLoginStart, String
             },
         };
         let _ = app_for_login.emit("codex-login-completed", event);
+        state_for_login.active_logins.lock().await.remove(&login_id);
     });
 
     Ok(login)
+}
+
+#[tauri::command]
+pub async fn codex_login_cancel(
+    state: State<'_, CodexState>,
+    login_id: String,
+) -> Result<(), String> {
+    if let Some(cancel) = state.active_logins.lock().await.remove(&login_id) {
+        let _ = cancel.send(());
+    }
+    Ok(())
 }
 
 async fn complete_device_login(
@@ -676,6 +702,10 @@ pub async fn codex_turn_interrupt(
 pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
     let cancels = std::mem::take(&mut *state.active_turns.lock().await);
     for cancel in cancels.into_values() {
+        let _ = cancel.send(());
+    }
+    let login_cancels = std::mem::take(&mut *state.active_logins.lock().await);
+    for cancel in login_cancels.into_values() {
         let _ = cancel.send(());
     }
     Ok(())

@@ -50,6 +50,7 @@
     // Callbacks
     onFetchModels: () => void
     onCodexLogin: () => void
+    onCodexCancel: () => void
     onCodexLogout: () => void
     onProviderTypeChange: (type: ProviderType) => void
     onRemoveFetchedModel: (model: string) => void
@@ -80,6 +81,7 @@
     codexError,
     onFetchModels,
     onCodexLogin,
+    onCodexCancel,
     onCodexLogout,
     onProviderTypeChange,
     onRemoveFetchedModel,
@@ -262,6 +264,7 @@
           </Button>
         {/if}
         {#if isCodexLoggingIn}
+          <Button variant="ghost" size="sm" onclick={onCodexCancel}>Cancel</Button>
           <p class="text-muted-foreground text-xs">
             {#if codexUserCode}
               Open the sign-in page and enter this code:
