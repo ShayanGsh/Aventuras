@@ -698,19 +698,6 @@ pub async fn codex_turn_interrupt(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn codex_disconnect(state: State<'_, CodexState>) -> Result<(), String> {
-    let cancels = std::mem::take(&mut *state.active_turns.lock().await);
-    for cancel in cancels.into_values() {
-        let _ = cancel.send(());
-    }
-    let login_cancels = std::mem::take(&mut *state.active_logins.lock().await);
-    for cancel in login_cancels.into_values() {
-        let _ = cancel.send(());
-    }
-    Ok(())
-}
-
 async fn run_turn(
     app: &AppHandle,
     handle: &CodexTurnHandle,

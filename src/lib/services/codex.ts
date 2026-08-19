@@ -102,10 +102,6 @@ class CodexService {
     return invoke('codex_list_models')
   }
 
-  async disconnect(): Promise<void> {
-    return invoke('codex_disconnect')
-  }
-
   async startTurn(request: CodexTurnRequest): Promise<CodexTurnHandle> {
     return invoke('codex_turn_start', {
       model: request.model,
