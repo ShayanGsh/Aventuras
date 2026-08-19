@@ -124,12 +124,10 @@ export function migrateCodexProvider<T extends { providerType: string; name: str
   profile: T,
 ): T {
   const isLegacyProvider = profile.providerType === 'openai-codex-direct'
-  const hasLegacyName = profile.name === 'OpenAI Codex-CLI'
-  if (!isLegacyProvider && !hasLegacyName) return profile
+  if (!isLegacyProvider) return profile
 
   return {
     ...profile,
     providerType: 'openai-codex',
-    name: hasLegacyName ? 'OpenAI Codex' : profile.name,
   }
 }

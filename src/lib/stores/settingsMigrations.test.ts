@@ -27,12 +27,6 @@ describe('migrateCodexProvider', () => {
     })
   })
 
-  it('renames the old generated profile label', () => {
-    expect(
-      migrateCodexProvider({ ...profile, providerType: 'openai-codex', name: 'OpenAI Codex-CLI' }),
-    ).toMatchObject({ name: 'OpenAI Codex', providerType: 'openai-codex' })
-  })
-
   it('leaves current profiles alone', () => {
     expect(migrateCodexProvider({ ...profile, providerType: 'openai-codex' })).toEqual({
       ...profile,
