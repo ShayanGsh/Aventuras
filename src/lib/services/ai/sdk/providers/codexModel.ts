@@ -8,9 +8,7 @@ import type {
 import {
   codexService,
   type CodexToolCall,
-  type CodexToolExecutor,
   type CodexReasoningItem,
-  type CodexToolResult,
   type CodexTurnRequest,
 } from '$lib/services/codex'
 import type {
@@ -24,7 +22,6 @@ interface CodexTransport {
     content: string
     reasoning: string | null
     toolCall?: CodexToolCall
-    toolResult?: CodexToolResult
     reasoningItem?: CodexReasoningItem
   }>
 }
@@ -222,7 +219,6 @@ function functionTools(options: LanguageModelV4CallOptions): unknown[] | undefin
 export function createCodexLanguageModel(
   providerType: 'openai-codex',
   modelId: string,
-  toolExecutor?: CodexToolExecutor,
 ): LanguageModelV4 {
   const transport: CodexTransport = codexService
 
@@ -238,7 +234,6 @@ export function createCodexLanguageModel(
       outputSchema: outputSchema(options),
       tools: functionTools(options),
       toolChoice: options.toolChoice,
-      toolExecutor,
       signal: options.abortSignal,
     }
   }
@@ -247,14 +242,12 @@ export function createCodexLanguageModel(
     let text = ''
     let reasoning = ''
     const toolCalls: CodexToolCall[] = []
-    const toolResults: CodexToolResult[] = []
     const reasoningItems: CodexReasoningItem[] = []
 
     for await (const delta of transport.streamTurn(request)) {
       text += delta.content
       if (delta.reasoning) reasoning += delta.reasoning
       if (delta.toolCall) toolCalls.push(delta.toolCall)
-      if (delta.toolResult) toolResults.push(delta.toolResult)
       if (
         delta.reasoningItem &&
         !reasoningItems.some((item) => item.id === delta.reasoningItem?.id)
@@ -263,19 +256,13 @@ export function createCodexLanguageModel(
       }
     }
 
-    return { text, reasoning, toolCalls, toolResults, reasoningItems }
+    return { text, reasoning, toolCalls, reasoningItems }
   }
 
   function finishReason(toolCalls: CodexToolCall[]) {
     return toolCalls.some((toolCall) => !toolCall.providerExecuted)
       ? { unified: 'tool-calls' as const, raw: 'tool_calls' }
       : { unified: 'stop' as const, raw: 'stop' }
-  }
-
-  function resultValue(value: unknown): any {
-    if (value === undefined) return ''
-    if (value === null) return ''
-    return value
   }
 
   return {
@@ -302,16 +289,6 @@ export function createCodexLanguageModel(
           input: jsonString(toolCall.input),
           providerExecuted: toolCall.providerExecuted,
           dynamic: toolCall.dynamic,
-        })
-      }
-      for (const toolResult of result.toolResults) {
-        content.push({
-          type: 'tool-result',
-          toolCallId: toolResult.id,
-          toolName: toolResult.name,
-          result: resultValue(toolResult.result),
-          isError: toolResult.isError,
-          dynamic: toolResult.dynamic,
         })
       }
       return {
@@ -374,17 +351,6 @@ export function createCodexLanguageModel(
                   input: jsonString(delta.toolCall.input),
                   providerExecuted: delta.toolCall.providerExecuted,
                   dynamic: delta.toolCall.dynamic,
-                })
-              }
-
-              if (delta.toolResult) {
-                controller.enqueue({
-                  type: 'tool-result',
-                  toolCallId: delta.toolResult.id,
-                  toolName: delta.toolResult.name,
-                  result: resultValue(delta.toolResult.result),
-                  isError: delta.toolResult.isError,
-                  dynamic: delta.toolResult.dynamic,
                 })
               }
             }

@@ -20,7 +20,6 @@ import { createModelFromProfile, PROVIDERS } from '../providers'
 import { buildProviderOptions } from '../generate'
 import { uniqueToolCallIdMiddleware } from '../middleware'
 import type { GenerationPreset, APIProfile, ProviderType, ReasoningEffort } from '$lib/types'
-import type { CodexToolExecutor } from '$lib/services/codex'
 import { createLogger } from '$lib/log'
 
 const log = createLogger('AgentFactory')
@@ -49,7 +48,6 @@ function resolveAgentConfig(
   presetId: string,
   serviceId: string,
   debugId?: string,
-  tools?: ToolSet,
 ): ResolvedAgentConfig {
   const preset = settings.getPresetConfig(presetId, serviceId)
   const profileId = preset.profileId ?? settings.apiSettings.mainNarrativeProfileId
@@ -78,8 +76,6 @@ function resolveAgentConfig(
   }
 
   const reasoning = preset.reasoningEffort
-  const toolExecutor =
-    isCodexProvider(profile.providerType) && tools ? createCodexToolExecutor(tools) : undefined
 
   const baseModel = createModelFromProfile({
     profile,
@@ -88,7 +84,6 @@ function resolveAgentConfig(
     debugId,
     structuredOutputs,
     serviceId,
-    toolExecutor,
   })
   // Wrap with uniqueToolCallIdMiddleware so providers that reuse IDs across steps
   // (e.g. Google's `functions.tool:0` scheme) get globally unique tool call IDs.
@@ -96,27 +91,6 @@ function resolveAgentConfig(
   const providerOptions = buildProviderOptions(preset, profile.providerType)
 
   return { preset, profile, providerType: profile.providerType, model, providerOptions, reasoning }
-}
-
-function isCodexProvider(providerType: ProviderType): boolean {
-  return providerType === 'openai-codex'
-}
-
-function createCodexToolExecutor(tools: ToolSet): CodexToolExecutor {
-  return async (toolName, input, { toolCallId, signal }) => {
-    const tool = tools[toolName] as
-      { execute?: (input: unknown, options: unknown) => unknown } | undefined
-    if (!tool?.execute) {
-      throw new Error(`Codex requested an unavailable Aventuras tool: ${toolName}`)
-    }
-
-    return tool.execute(input, {
-      toolCallId,
-      messages: [],
-      abortSignal: signal,
-      context: {},
-    })
-  }
 }
 
 /**
@@ -173,7 +147,6 @@ export function createAgentFromPreset<TTools extends ToolSet>(
     presetId,
     serviceId,
     undefined,
-    tools,
   )
 
   log('createAgentFromPreset', {
@@ -244,7 +217,6 @@ export function createStreamingAgenticAssistant<TTools extends ToolSet>(
     presetId,
     serviceId,
     undefined,
-    tools,
   )
 
   log('createStreamingAgenticAssistant', {

@@ -9,21 +9,6 @@ export interface CodexToolCall {
   dynamic?: boolean
 }
 
-export interface CodexToolResult {
-  id: string
-  name: string
-  result: unknown
-  isError?: boolean
-  providerExecuted?: boolean
-  dynamic?: boolean
-}
-
-export type CodexToolExecutor = (
-  toolName: string,
-  input: unknown,
-  context: { toolCallId: string; signal?: AbortSignal },
-) => Promise<unknown>
-
 export interface CodexReasoningItem {
   id: string
   encryptedContent: string
@@ -84,7 +69,6 @@ export interface CodexTurnRequest {
   outputSchema?: unknown
   tools?: unknown[]
   toolChoice?: unknown
-  toolExecutor?: CodexToolExecutor
   signal?: AbortSignal
 }
 

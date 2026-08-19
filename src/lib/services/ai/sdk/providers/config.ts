@@ -33,7 +33,6 @@ export interface ProviderCapabilities {
    */
   reasoningExtraction?: 'think-tag'
   modelCapabilityFetching?: boolean
-  toolCalling?: boolean
 }
 
 export interface ProviderServices {
@@ -323,7 +322,6 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
       structuredOutput: false,
       reasoning: true,
       modelCapabilityFetching: true,
-      toolCalling: true,
     },
     // Authentication and generation use Aventuras' OAuth-backed Codex transport.
   },
