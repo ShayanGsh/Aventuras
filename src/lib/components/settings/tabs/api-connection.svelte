@@ -404,7 +404,6 @@
       })
   })
 
-  // Fix #1: shared handler to avoid duplication between new-profile and edit forms
   function handleProviderTypeChange(v: ProviderType) {
     if (!isCodexProvider(v) && codexLoginId) void handleCodexCancel()
     formProviderType = v
