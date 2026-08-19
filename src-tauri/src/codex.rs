@@ -26,6 +26,7 @@ const CODEX_USER_AGENT: &str = concat!("Aventuras/", env!("CARGO_PKG_VERSION"));
 const CODEX_ORIGINATOR: &str = "aventuras";
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 120;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default, Clone)]
@@ -254,6 +255,15 @@ fn http_client() -> Result<reqwest::Client, String> {
         .user_agent(CODEX_USER_AGENT)
         .build()
         .map_err(|error| format!("Failed to create Codex HTTP client: {error}"))
+}
+
+fn stream_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(REQUEST_TIMEOUT)
+        .read_timeout(STREAM_READ_TIMEOUT)
+        .user_agent(CODEX_USER_AGENT)
+        .build()
+        .map_err(|error| format!("Failed to create Codex stream client: {error}"))
 }
 
 async fn response_error(context: &str, response: reqwest::Response) -> String {
@@ -683,23 +693,23 @@ async fn run_turn(
         tools,
         tool_choice,
     );
-    let client = match http_client() {
+    let client = match stream_client() {
         Ok(client) => client,
         Err(error) => return TurnResult::Failed(error),
     };
-    let response = match apply_codex_headers(
-        client
-            .post(format!("{CODEX_BASE_URL}/responses"))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .json(&body),
-        &auth,
-    )
-    .send()
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => return TurnResult::Failed(format!("Codex request failed: {error}")),
+    let response = tokio::select! {
+        _ = &mut cancel => return TurnResult::Interrupted,
+        response = apply_codex_headers(
+            client
+                .post(format!("{CODEX_BASE_URL}/responses"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .json(&body),
+            &auth,
+        ).send() => match response {
+            Ok(response) => response,
+            Err(error) => return TurnResult::Failed(format!("Codex request failed: {error}")),
+        },
     };
 
     if !response.status().is_success() {
