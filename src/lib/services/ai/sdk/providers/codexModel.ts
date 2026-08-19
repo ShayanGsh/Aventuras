@@ -1,6 +1,7 @@
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
+  LanguageModelV4Content,
   LanguageModelV4Prompt,
   LanguageModelV4StreamPart,
   LanguageModelV4Usage,
@@ -272,7 +273,7 @@ export function createCodexLanguageModel(
     supportedUrls: {},
     doGenerate: async (options) => {
       const result = await collect(buildRequest(options))
-      const content: Array<any> = []
+      const content: LanguageModelV4Content[] = []
       if (result.reasoning || result.reasoningItems.length > 0) {
         content.push({
           type: 'reasoning',
