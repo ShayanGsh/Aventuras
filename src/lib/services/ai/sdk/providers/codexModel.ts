@@ -9,9 +9,15 @@ import {
   codexService,
   type CodexToolCall,
   type CodexToolExecutor,
+  type CodexReasoningItem,
   type CodexToolResult,
   type CodexTurnRequest,
 } from '$lib/services/codex'
+import type {
+  JSONObject,
+  SharedV4ProviderMetadata,
+  SharedV4ProviderOptions,
+} from '@ai-sdk/provider'
 
 interface CodexTransport {
   streamTurn(request: CodexTurnRequest): AsyncIterable<{
@@ -19,8 +25,11 @@ interface CodexTransport {
     reasoning: string | null
     toolCall?: CodexToolCall
     toolResult?: CodexToolResult
+    reasoningItem?: CodexReasoningItem
   }>
 }
+
+const CODEX_PROVIDER_METADATA_KEY = 'openaiCodex'
 
 const EMPTY_USAGE: LanguageModelV4Usage = {
   inputTokens: {
@@ -82,7 +91,22 @@ function toolResultText(output: unknown): string {
   return jsonString(output)
 }
 
-function buildPrompt(prompt: LanguageModelV4Prompt): {
+function readReasoningItems(part: {
+  providerOptions?: SharedV4ProviderOptions
+}): CodexReasoningItem[] {
+  const providerOptions = part.providerOptions?.[CODEX_PROVIDER_METADATA_KEY]
+  const reasoningItems = providerOptions?.reasoningItems
+  if (!Array.isArray(reasoningItems)) return []
+
+  return reasoningItems.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const value = item as { id?: unknown; encryptedContent?: unknown }
+    if (typeof value.id !== 'string' || typeof value.encryptedContent !== 'string') return []
+    return [{ id: value.id, encryptedContent: value.encryptedContent }]
+  })
+}
+
+export function buildPrompt(prompt: LanguageModelV4Prompt): {
   system: string
   prompt: string
   input: unknown[]
@@ -116,25 +140,41 @@ function buildPrompt(prompt: LanguageModelV4Prompt): {
     }
 
     if (message.role === 'assistant') {
-      const text = contentText(
-        message.content.filter((part) => part.type === 'text') as typeof message.content,
-      )
-      if (text) {
-        input.push({
-          role: 'assistant',
-          content: [{ type: 'output_text', text }],
-        })
+      let textParts: string[] = []
+      const flushText = () => {
+        const text = textParts.join('')
+        textParts = []
+        if (text) {
+          input.push({
+            role: 'assistant',
+            content: [{ type: 'output_text', text }],
+          })
+        }
       }
 
       for (const part of message.content) {
-        if (part.type !== 'tool-call') continue
-        input.push({
-          type: 'function_call',
-          call_id: part.toolCallId,
-          name: part.toolName,
-          arguments: jsonString(part.input),
-        })
+        if (part.type === 'text') {
+          textParts.push(part.text)
+        } else if (part.type === 'reasoning') {
+          flushText()
+          for (const item of readReasoningItems(part)) {
+            input.push({
+              type: 'reasoning',
+              id: item.id,
+              encrypted_content: item.encryptedContent,
+            })
+          }
+        } else if (part.type === 'tool-call') {
+          flushText()
+          input.push({
+            type: 'function_call',
+            call_id: part.toolCallId,
+            name: part.toolName,
+            arguments: jsonString(part.input),
+          })
+        }
       }
+      flushText()
       continue
     }
 
@@ -154,6 +194,17 @@ function buildPrompt(prompt: LanguageModelV4Prompt): {
 function reasoningEffort(options: LanguageModelV4CallOptions): string {
   const effort = options.reasoning
   return effort && effort !== 'provider-default' ? effort : 'medium'
+}
+
+function reasoningMetadata(items: CodexReasoningItem[]): SharedV4ProviderMetadata | undefined {
+  if (items.length === 0) return undefined
+  const metadata: JSONObject = {
+    reasoningItems: items.map((item): JSONObject => ({
+      id: item.id,
+      encryptedContent: item.encryptedContent,
+    })),
+  }
+  return { [CODEX_PROVIDER_METADATA_KEY]: metadata }
 }
 
 function outputSchema(options: LanguageModelV4CallOptions): unknown {
@@ -193,15 +244,22 @@ export function createCodexLanguageModel(
     let reasoning = ''
     const toolCalls: CodexToolCall[] = []
     const toolResults: CodexToolResult[] = []
+    const reasoningItems: CodexReasoningItem[] = []
 
     for await (const delta of transport.streamTurn(request)) {
       text += delta.content
       if (delta.reasoning) reasoning += delta.reasoning
       if (delta.toolCall) toolCalls.push(delta.toolCall)
       if (delta.toolResult) toolResults.push(delta.toolResult)
+      if (
+        delta.reasoningItem &&
+        !reasoningItems.some((item) => item.id === delta.reasoningItem?.id)
+      ) {
+        reasoningItems.push(delta.reasoningItem)
+      }
     }
 
-    return { text, reasoning, toolCalls, toolResults }
+    return { text, reasoning, toolCalls, toolResults, reasoningItems }
   }
 
   function finishReason(toolCalls: CodexToolCall[]) {
@@ -224,7 +282,13 @@ export function createCodexLanguageModel(
     doGenerate: async (options) => {
       const result = await collect(buildRequest(options))
       const content: Array<any> = []
-      if (result.reasoning) content.push({ type: 'reasoning', text: result.reasoning })
+      if (result.reasoning || result.reasoningItems.length > 0) {
+        content.push({
+          type: 'reasoning',
+          text: result.reasoning,
+          providerMetadata: reasoningMetadata(result.reasoningItems),
+        })
+      }
       if (result.text) content.push({ type: 'text', text: result.text })
       for (const toolCall of result.toolCalls) {
         content.push({
@@ -246,7 +310,6 @@ export function createCodexLanguageModel(
           dynamic: toolResult.dynamic,
         })
       }
-
       return {
         content,
         finishReason: finishReason(result.toolCalls),
@@ -264,21 +327,30 @@ export function createCodexLanguageModel(
           let textStarted = false
           let reasoningStarted = false
           const toolCalls: CodexToolCall[] = []
+          const reasoningItems: CodexReasoningItem[] = []
 
           controller.enqueue({ type: 'stream-start', warnings: [] })
 
           try {
             for await (const delta of transport.streamTurn(request)) {
-              if (delta.reasoning) {
+              if (delta.reasoning || delta.reasoningItem) {
                 if (!reasoningStarted) {
                   reasoningStarted = true
                   controller.enqueue({ type: 'reasoning-start', id: reasoningId })
                 }
-                controller.enqueue({
-                  type: 'reasoning-delta',
-                  id: reasoningId,
-                  delta: delta.reasoning,
-                })
+                if (delta.reasoning) {
+                  controller.enqueue({
+                    type: 'reasoning-delta',
+                    id: reasoningId,
+                    delta: delta.reasoning,
+                  })
+                }
+                if (
+                  delta.reasoningItem &&
+                  !reasoningItems.some((item) => item.id === delta.reasoningItem?.id)
+                ) {
+                  reasoningItems.push(delta.reasoningItem)
+                }
               }
 
               if (delta.content) {
@@ -313,7 +385,13 @@ export function createCodexLanguageModel(
               }
             }
 
-            if (reasoningStarted) controller.enqueue({ type: 'reasoning-end', id: reasoningId })
+            if (reasoningStarted) {
+              controller.enqueue({
+                type: 'reasoning-end',
+                id: reasoningId,
+                providerMetadata: reasoningMetadata(reasoningItems),
+              })
+            }
             if (textStarted) controller.enqueue({ type: 'text-end', id: textId })
             controller.enqueue({
               type: 'finish',

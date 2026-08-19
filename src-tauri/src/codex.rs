@@ -83,6 +83,8 @@ struct CodexTurnDelta {
     reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call: Option<CodexToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_item: Option<CodexReasoningItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +93,13 @@ struct CodexToolCall {
     id: String,
     name: String,
     input: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexReasoningItem {
+    id: String,
+    encrypted_content: String,
 }
 
 #[derive(Debug, Clone)]
@@ -721,6 +730,7 @@ async fn run_turn(
     let mut emitted_text = false;
     let mut pending_function_calls = HashMap::new();
     let mut emitted_tool_calls = HashSet::new();
+    let mut emitted_reasoning_items = HashSet::new();
 
     loop {
         let chunk = tokio::select! {
@@ -746,6 +756,7 @@ async fn run_turn(
                 &mut emitted_text,
                 &mut pending_function_calls,
                 &mut emitted_tool_calls,
+                &mut emitted_reasoning_items,
             ) {
                 return result;
             }
@@ -766,6 +777,7 @@ async fn run_turn(
                 &mut emitted_text,
                 &mut pending_function_calls,
                 &mut emitted_tool_calls,
+                &mut emitted_reasoning_items,
             ) {
                 return result;
             }
@@ -933,6 +945,7 @@ fn handle_stream_event(
     emitted_text: &mut bool,
     pending_function_calls: &mut HashMap<String, PendingFunctionCall>,
     emitted_tool_calls: &mut HashSet<String>,
+    emitted_reasoning_items: &mut HashSet<String>,
 ) -> Option<TurnResult> {
     let event_type = event
         .get("type")
@@ -981,6 +994,7 @@ fn handle_stream_event(
 
     if event_type == "response.output_item.added" {
         if let Some(item) = event.get("item") {
+            emit_reasoning_item(app, handle, item, emitted_reasoning_items);
             remember_function_call(item, pending_function_calls);
         }
     } else if event_type == "response.function_call_arguments.delta" {
@@ -1003,6 +1017,7 @@ fn handle_stream_event(
         }
     } else if event_type == "response.output_item.done" {
         if let Some(item) = event.get("item") {
+            emit_reasoning_item(app, handle, item, emitted_reasoning_items);
             if let Some(call) = remember_function_call(item, pending_function_calls) {
                 emit_function_call(app, handle, &call, emitted_tool_calls);
             }
@@ -1010,6 +1025,38 @@ fn handle_stream_event(
     }
 
     None
+}
+
+fn parse_reasoning_item(item: &Value) -> Option<CodexReasoningItem> {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return None;
+    }
+    let id = item.get("id").and_then(Value::as_str)?.trim();
+    let encrypted_content = item
+        .get("encrypted_content")
+        .and_then(Value::as_str)?
+        .trim();
+    if id.is_empty() || encrypted_content.is_empty() {
+        return None;
+    }
+    Some(CodexReasoningItem {
+        id: id.to_string(),
+        encrypted_content: encrypted_content.to_string(),
+    })
+}
+
+fn emit_reasoning_item(
+    app: &AppHandle,
+    handle: &CodexTurnHandle,
+    item: &Value,
+    emitted_reasoning_items: &mut HashSet<String>,
+) {
+    let Some(reasoning_item) = parse_reasoning_item(item) else {
+        return;
+    };
+    if emitted_reasoning_items.insert(reasoning_item.id.clone()) {
+        emit_delta(app, handle, String::new(), None, None, Some(reasoning_item));
+    }
 }
 
 fn remember_function_call(
@@ -1068,11 +1115,11 @@ fn emit_turn_delta(
     content: String,
     reasoning: Option<String>,
 ) {
-    emit_delta(app, handle, content, reasoning, None);
+    emit_delta(app, handle, content, reasoning, None, None);
 }
 
 fn emit_tool_call(app: &AppHandle, handle: &CodexTurnHandle, tool_call: CodexToolCall) {
-    emit_delta(app, handle, String::new(), None, Some(tool_call));
+    emit_delta(app, handle, String::new(), None, Some(tool_call), None);
 }
 
 fn emit_delta(
@@ -1081,6 +1128,7 @@ fn emit_delta(
     content: String,
     reasoning: Option<String>,
     tool_call: Option<CodexToolCall>,
+    reasoning_item: Option<CodexReasoningItem>,
 ) {
     let _ = app.emit(
         "codex-turn-delta",
@@ -1090,6 +1138,7 @@ fn emit_delta(
             content,
             reasoning,
             tool_call,
+            reasoning_item,
         },
     );
 }
@@ -1114,8 +1163,8 @@ fn emit_turn_completed(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_turn_body, normalize_tool_choice, normalize_tools, parse_sse_event, take_sse_event,
-        wire_reasoning_effort,
+        build_turn_body, normalize_tool_choice, normalize_tools, parse_reasoning_item,
+        parse_sse_event, take_sse_event, wire_reasoning_effort,
     };
     use serde_json::json;
 
@@ -1208,6 +1257,26 @@ data: "delta":"Hi"}
         assert_eq!(wire_reasoning_effort("minimal"), Some("low"));
         assert_eq!(wire_reasoning_effort("xhigh"), Some("high"));
         assert_eq!(wire_reasoning_effort("none"), None);
+        assert_eq!(wire_reasoning_effort("max"), Some("max"));
+    }
+
+    #[test]
+    fn extracts_encrypted_reasoning_items_for_replay() {
+        let item = parse_reasoning_item(&json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "encrypted_content": "opaque-reasoning"
+        }))
+        .expect("reasoning item should be retained");
+
+        assert_eq!(item.id, "rs_123");
+        assert_eq!(item.encrypted_content, "opaque-reasoning");
+        assert!(parse_reasoning_item(&json!({
+            "type": "message",
+            "id": "msg_123",
+            "encrypted_content": "opaque-reasoning"
+        }))
+        .is_none());
     }
 
     #[test]

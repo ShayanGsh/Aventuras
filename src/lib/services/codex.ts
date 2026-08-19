@@ -24,6 +24,11 @@ export type CodexToolExecutor = (
   context: { toolCallId: string; signal?: AbortSignal },
 ) => Promise<unknown>
 
+export interface CodexReasoningItem {
+  id: string
+  encryptedContent: string
+}
+
 export interface CodexAccount {
   authMode: string
   email: string | null
@@ -59,7 +64,7 @@ export interface CodexTurnDelta {
   content: string
   reasoning: string | null
   toolCall?: CodexToolCall
-  toolResult?: CodexToolResult
+  reasoningItem?: CodexReasoningItem
 }
 
 export interface CodexTurnCompleted {
