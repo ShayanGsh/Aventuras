@@ -12,7 +12,9 @@ import {
   type CodexReasoningItem,
   type CodexTurnRequest,
 } from '$lib/services/codex'
+import { isJSONArray } from '@ai-sdk/provider'
 import type {
+  JSONArray,
   JSONObject,
   SharedV4ProviderMetadata,
   SharedV4ProviderOptions,
@@ -98,9 +100,15 @@ function readReasoningItems(part: {
 
   return reasoningItems.flatMap((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
-    const value = item as { id?: unknown; encryptedContent?: unknown }
+    const value = item as { id?: unknown; encryptedContent?: unknown; summary?: unknown }
     if (typeof value.id !== 'string' || typeof value.encryptedContent !== 'string') return []
-    return [{ id: value.id, encryptedContent: value.encryptedContent }]
+    return [
+      {
+        id: value.id,
+        encryptedContent: value.encryptedContent,
+        summary: isJSONArray(value.summary) ? value.summary : ([] as JSONArray),
+      },
+    ]
   })
 }
 
@@ -160,6 +168,7 @@ export function buildPrompt(prompt: LanguageModelV4Prompt): {
               type: 'reasoning',
               id: item.id,
               encrypted_content: item.encryptedContent,
+              summary: item.summary,
             })
           }
         } else if (part.type === 'tool-call') {
@@ -203,6 +212,7 @@ function reasoningMetadata(items: CodexReasoningItem[]): SharedV4ProviderMetadat
     reasoningItems: items.map((item): JSONObject => ({
       id: item.id,
       encryptedContent: item.encryptedContent,
+      summary: item.summary,
     })),
   }
   return { [CODEX_PROVIDER_METADATA_KEY]: metadata }

@@ -101,6 +101,7 @@ struct CodexToolCall {
 struct CodexReasoningItem {
     id: String,
     encrypted_content: String,
+    summary: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -1011,7 +1012,6 @@ fn handle_stream_event(
 
     if event_type == "response.output_item.added" {
         if let Some(item) = event.get("item") {
-            emit_reasoning_item(app, handle, item, emitted_reasoning_items);
             remember_function_call(item, pending_function_calls);
         }
     } else if event_type == "response.function_call_arguments.delta" {
@@ -1059,6 +1059,11 @@ fn parse_reasoning_item(item: &Value) -> Option<CodexReasoningItem> {
     Some(CodexReasoningItem {
         id: id.to_string(),
         encrypted_content: encrypted_content.to_string(),
+        summary: item
+            .get("summary")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -1282,12 +1287,17 @@ data: "delta":"Hi"}
         let item = parse_reasoning_item(&json!({
             "type": "reasoning",
             "id": "rs_123",
-            "encrypted_content": "opaque-reasoning"
+            "encrypted_content": "opaque-reasoning",
+            "summary": [{ "type": "summary_text", "text": "A summary." }]
         }))
         .expect("reasoning item should be retained");
 
         assert_eq!(item.id, "rs_123");
         assert_eq!(item.encrypted_content, "opaque-reasoning");
+        assert_eq!(
+            item.summary,
+            vec![json!({ "type": "summary_text", "text": "A summary." })]
+        );
         assert!(parse_reasoning_item(&json!({
             "type": "message",
             "id": "msg_123",

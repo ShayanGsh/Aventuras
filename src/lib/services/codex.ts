@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import type { JSONArray } from '@ai-sdk/provider'
 
 export interface CodexToolCall {
   id: string
@@ -12,6 +13,7 @@ export interface CodexToolCall {
 export interface CodexReasoningItem {
   id: string
   encryptedContent: string
+  summary: JSONArray
 }
 
 export interface CodexAccount {

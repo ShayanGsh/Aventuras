@@ -15,7 +15,13 @@ describe('buildPrompt', () => {
             text: 'This internal explanation must not be replayed as plain text.',
             providerOptions: {
               openaiCodex: {
-                reasoningItems: [{ id: 'rs_123', encryptedContent: 'opaque-reasoning' }],
+                reasoningItems: [
+                  {
+                    id: 'rs_123',
+                    encryptedContent: 'opaque-reasoning',
+                    summary: [{ type: 'summary_text', text: 'A summary.' }],
+                  },
+                ],
               },
             },
           },
@@ -50,6 +56,7 @@ describe('buildPrompt', () => {
         type: 'reasoning',
         id: 'rs_123',
         encrypted_content: 'opaque-reasoning',
+        summary: [{ type: 'summary_text', text: 'A summary.' }],
       },
       {
         role: 'assistant',
