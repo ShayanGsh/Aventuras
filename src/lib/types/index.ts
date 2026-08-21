@@ -655,6 +655,7 @@ export type ProviderType =
   | 'llamacpp' // @ai-sdk/openai (local, default localhost:8080)
   | 'nvidia-nim' // @ai-sdk/openai (NVIDIA NIM)
   | 'openai-compatible' // @ai-sdk/openai-compatible (requires custom baseUrl)
+  | 'openai-codex' // OAuth-backed Codex Responses transport (ChatGPT sign-in)
   | 'openai' // @ai-sdk/openai
   | 'anthropic' // @ai-sdk/anthropic
   | 'google' // @ai-sdk/google

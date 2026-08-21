@@ -32,6 +32,7 @@ import {
   thinkingNudgeApplies,
   type ResolvedPreset,
 } from './presetResolution'
+import { codexService } from '$lib/services/codex'
 
 const log = createLogger('Generate')
 
@@ -53,7 +54,6 @@ interface GenerateObjectOptions<T extends z.ZodType> extends BaseGenerateOptions
   schema: T
 }
 
-// ============================================================================
 // Config Resolution
 // ============================================================================
 
@@ -107,7 +107,7 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     model: baseModelId,
     temperature: settings.apiSettings.temperature,
     maxTokens: settings.apiSettings.maxTokens,
-    reasoningEffort: reasoningEffort,
+    reasoningEffort,
     manualBody: settings.apiSettings.manualBody ?? '',
   }
 
@@ -120,6 +120,26 @@ function resolveNarrativeConfig(debugId?: string): NarrativeConfig {
     providerOptions: buildProviderOptions(narrativePreset, profile.providerType),
     reasoning: reasoningEffort,
     useThinkTag: usesThinkTag(profile.providerType),
+  }
+}
+
+function parseCodexStructuredOutput<T extends z.ZodType>(response: string, schema: T): z.infer<T> {
+  const trimmed = response.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const jsonText = fenced?.[1] ?? trimmed
+
+  let value: unknown
+  try {
+    value = JSON.parse(jsonText)
+  } catch {
+    value = JSON.parse(jsonrepair(jsonText))
+  }
+
+  try {
+    return schema.parse(value) as z.infer<T>
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Codex returned invalid structured output: ${message}`)
   }
 }
 
@@ -211,6 +231,18 @@ export async function generateStructured<T extends z.ZodType>(
 ): Promise<z.infer<T>> {
   const { presetId, schema, system, prompt, signal } = options
   const config = resolveConfig(presetId, serviceId)
+  if (config.providerType === 'openai-codex') {
+    const response = await codexService.generateText({
+      model: config.preset.model,
+      system,
+      prompt,
+      reasoningEffort: config.preset.reasoningEffort,
+      outputSchema: z.toJSONSchema(schema),
+      signal,
+    })
+    return parseCodexStructuredOutput(response, schema)
+  }
+
   const { preset, providerType, model, providerOptions, reasoning, supportsStructuredOutput } =
     config
 
@@ -244,10 +276,18 @@ export async function generatePlainText(
   serviceId: string,
 ): Promise<string> {
   const { presetId, system, prompt, signal } = options
-  const { preset, providerType, model, providerOptions, reasoning, useThinkTag } = resolveConfig(
-    presetId,
-    serviceId,
-  )
+  const config = resolveConfig(presetId, serviceId)
+  if (config.providerType === 'openai-codex') {
+    return codexService.generateText({
+      model: config.preset.model,
+      system,
+      prompt,
+      reasoningEffort: config.preset.reasoningEffort,
+      signal,
+    })
+  }
+
+  const { preset, providerType, model, providerOptions, reasoning, useThinkTag } = config
 
   log('generatePlainText', { presetId, model: preset.model, providerType })
 
@@ -315,6 +355,16 @@ export async function generateNarrative(options: NarrativeGenerateOptions): Prom
   const { system, prompt, signal } = options
   const { providerType, model, temperature, maxTokens, providerOptions, reasoning, useThinkTag } =
     resolveNarrativeConfig()
+
+  if (providerType === 'openai-codex') {
+    return codexService.generateText({
+      model: settings.apiSettings.defaultModel,
+      system,
+      prompt,
+      reasoningEffort: settings.apiSettings.reasoningEffort,
+      signal,
+    })
+  }
 
   log('generateNarrative', { model: settings.apiSettings.defaultModel, providerType })
 

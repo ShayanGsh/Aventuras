@@ -310,6 +310,21 @@ export const PROVIDERS: Record<ProviderType, ProviderConfig> = {
     // No service defaults - user must configure models in Generation Settings
   },
 
+  'openai-codex': {
+    name: 'OpenAI Codex',
+    description: 'Use ChatGPT sign-in with Codex access',
+    baseUrl: '',
+    requiresApiKey: false,
+    capabilities: {
+      textGeneration: true,
+      imageGeneration: false,
+      structuredOutput: true,
+      reasoning: true,
+      modelCapabilityFetching: true,
+    },
+    // Authentication and generation use Aventuras' OAuth-backed Codex transport.
+  },
+
   openai: {
     name: 'OpenAI',
     description: 'GPT models from OpenAI',

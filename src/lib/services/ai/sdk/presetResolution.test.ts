@@ -20,7 +20,7 @@ import {
   resolveStructuredOutputs,
   thinkingNudgeApplies,
 } from './presetResolution'
-import { usesThinkTag } from './providers/config'
+import { PROVIDERS, usesThinkTag } from './providers/config'
 import type { GenerationPreset } from '$lib/types'
 
 describe('buildProviderOptions', () => {
@@ -107,6 +107,14 @@ describe('buildProviderOptions', () => {
     expect(result).toEqual({ llamacpp: { reasoningEffort: 'none' } })
   })
 
+  it('uses the native Codex provider option key', () => {
+    expect(
+      buildProviderOptions({ ...basePreset, reasoningEffort: 'xhigh' }, 'openai-codex'),
+    ).toEqual({
+      openaiCodex: { reasoningEffort: 'xhigh' },
+    })
+  })
+
   it('looks up hyphenated providers under the camelCase key the SDK prefers', () => {
     expect(buildProviderOptions({ ...basePreset, reasoningEffort: 'low' }, 'nvidia-nim')).toEqual({
       nvidiaNim: { reasoningEffort: 'low' },
@@ -118,6 +126,12 @@ describe('buildProviderOptions', () => {
     expect(
       buildProviderOptions({ ...basePreset, reasoningEffort: 'medium' }, 'pollinations'),
     ).toEqual({ pollinations: { reasoning_effort: 'medium', parallel_tool_calls: true } })
+  })
+})
+
+describe('Codex capabilities', () => {
+  it('advertises the structured output supported by its Responses transport', () => {
+    expect(PROVIDERS['openai-codex'].capabilities.structuredOutput).toBe(true)
   })
 })
 

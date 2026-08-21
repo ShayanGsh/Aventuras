@@ -27,6 +27,7 @@ import {
 } from '$lib/services/ai/core/defaults'
 import { isReasoningOn } from '$lib/services/ai/core/reasoning'
 import {
+  migrateCodexProvider,
   migrateContextWindow,
   migrateEntryRetrieval,
   migrateImageGeneration,
@@ -63,13 +64,22 @@ function mergeProfileModels(fetchedModels: TextModel[], customModels: string[]):
   return dedupeTextModels([...fetchedModels, ...dedupeModelIds(customModels).map((id) => ({ id }))])
 }
 
-function normalizeProfile(profile: APIProfile): APIProfile {
-  return {
+function migrateLegacyCodexProfile(profile: APIProfile): APIProfile {
+  return migrateCodexProvider({
     ...profile,
-    customModels: dedupeModelIds(profile.customModels ?? []),
-    fetchedModels: dedupeTextModels(profile.fetchedModels ?? []),
-    hiddenModels: dedupeModelIds(profile.hiddenModels ?? []),
-    favoriteModels: dedupeModelIds(profile.favoriteModels ?? []),
+    providerType: profile.providerType as string,
+  }) as APIProfile
+}
+
+function normalizeProfile(profile: APIProfile): APIProfile {
+  const migrated = migrateLegacyCodexProfile(profile)
+
+  return {
+    ...migrated,
+    customModels: dedupeModelIds(migrated.customModels ?? []),
+    fetchedModels: dedupeTextModels(migrated.fetchedModels ?? []),
+    hiddenModels: dedupeModelIds(migrated.hiddenModels ?? []),
+    favoriteModels: dedupeModelIds(migrated.favoriteModels ?? []),
   }
 }
 

@@ -20,6 +20,7 @@ import type { APIProfile } from '$lib/types'
 import { createTimeoutFetch } from './fetch'
 import { PROVIDERS, getBaseUrl } from './config'
 import { settings } from '$lib/stores/settings.svelte'
+import { createCodexLanguageModel } from './codexModel'
 
 export function createModelFromProfile(options: {
   profile: APIProfile
@@ -149,6 +150,9 @@ function createProviderFromProfile(options: {
         supportsStructuredOutputs,
         fetch,
       })
+
+    case 'openai-codex':
+      return (modelId: string) => createCodexLanguageModel('openai-codex', modelId)
 
     case 'xai':
       return createXai({ apiKey: profile.apiKey, baseURL, fetch })

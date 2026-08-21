@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  migrateCodexProvider,
   migrateContextWindow,
   migrateEntryRetrieval,
   migrateImageGeneration,
@@ -12,6 +13,40 @@ import {
   ENTRY_RETRIEVAL_DEFAULTS,
   WORLD_STATE_INJECTION_DEFAULTS,
 } from '$lib/services/ai/core/defaults'
+
+describe('migrateCodexProvider', () => {
+  const profile = {
+    id: 'codex-profile',
+    name: 'Saved Codex',
+    providerType: 'openai-codex-direct',
+    customModels: ['gpt-5.6-luna'],
+  }
+
+  it('moves the retired provider ID to the sole Codex provider', () => {
+    expect(migrateCodexProvider(profile)).toMatchObject({
+      name: 'Saved Codex',
+      providerType: 'openai-codex',
+      customModels: ['gpt-5.6-luna'],
+    })
+  })
+
+  it('leaves current profiles alone', () => {
+    expect(migrateCodexProvider({ ...profile, providerType: 'openai-codex' })).toEqual({
+      ...profile,
+      providerType: 'openai-codex',
+    })
+  })
+
+  it('does not guess at unknown provider records', () => {
+    const unknown = {
+      ...profile,
+      providerType: 'future-provider',
+      customModels: ['model-from-a-future-version'],
+    }
+
+    expect(migrateCodexProvider(unknown)).toEqual(unknown)
+  })
+})
 
 interface MergedWorldState {
   tier3WholesaleWordBudget: number

@@ -3,6 +3,7 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod avt_import;
 mod backup;
+mod codex;
 mod db;
 mod db_tx;
 mod migration_patch;
@@ -11,6 +12,10 @@ mod sync;
 use backup::{
     backup_database, export_images_zip, export_single_image, export_story_avt, import_saf_to_temp,
     restore_database,
+};
+use codex::{
+    codex_account_read, codex_list_models, codex_login_cancel, codex_login_start, codex_logout,
+    codex_turn_interrupt, codex_turn_start,
 };
 use sync::commands::{
     clear_received_stories, get_received_stories, start_sync_server, stop_sync_server,
@@ -256,6 +261,7 @@ pub fn run() {
     }
 
     builder
+        .manage(codex::CodexState::default())
         .manage(sync::SyncState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -283,6 +289,13 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
+            codex_account_read,
+            codex_login_start,
+            codex_login_cancel,
+            codex_logout,
+            codex_list_models,
+            codex_turn_start,
+            codex_turn_interrupt,
             start_sync_server,
             stop_sync_server,
             get_received_stories,

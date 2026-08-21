@@ -38,6 +38,7 @@ const PROVIDER_OPTIONS_KEY: Record<ProviderType, string> = {
   // reads the raw one but emits a deprecation warning for it.
   'nvidia-nim': 'nvidiaNim',
   'openai-compatible': 'openaiCompatible',
+  'openai-codex': 'openaiCodex',
   openai: 'openai',
   anthropic: 'anthropic',
   google: 'google',
@@ -93,6 +94,10 @@ export function buildProviderOptions(
       case 'chutes':
       case 'nvidia-nim':
       case 'openai-compatible':
+        options = { reasoningEffort: reasoning_effort }
+        break
+      case 'openai-codex':
+        // The native transport reads this provider option directly.
         options = { reasoningEffort: reasoning_effort }
         break
       case 'pollinations':

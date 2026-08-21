@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
+  import { listen } from '@tauri-apps/api/event'
+  import { openUrl } from '@tauri-apps/plugin-opener'
   import { createDebouncedSave } from '$lib/utils/debounce'
   import { settings } from '$lib/stores/settings.svelte'
   import type { APIProfile, ProviderType, TextModel } from '$lib/types'
+  import type { CodexAccount } from '$lib/services/codex'
+  import { codexService } from '$lib/services/codex'
   import { fetchModelsFromProvider } from '$lib/services/ai/sdk/providers'
   import { PROVIDERS } from '$lib/services/ai/sdk/providers/config'
   import { pingProfileModels, isPingEligible } from '$lib/services/modelHealthOrchestrator'
@@ -41,6 +45,87 @@
   let isFetchingModels = $state(false)
   let fetchError = $state<string | null>(null)
   let openCollapsibles = $state<Set<string>>(new Set())
+  let codexAccount = $state<CodexAccount | null>(null)
+  let isCodexLoggingIn = $state(false)
+  let codexLoginId = $state<string | null>(null)
+  let codexError = $state<string | null>(null)
+  let codexUserCode = $state<string | null>(null)
+  let unlistenCodexLogin: (() => void) | undefined
+
+  interface CodexLoginCompleted {
+    loginId: string | null
+    success: boolean
+    error: string | null
+  }
+
+  function formatCodexError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  function isCodexProvider(providerType: ProviderType = formProviderType): boolean {
+    return providerType === 'openai-codex'
+  }
+
+  async function loadCodexAccount() {
+    try {
+      const state = await codexService.readAccount()
+      codexAccount = state.account
+      codexError = null
+    } catch (error) {
+      codexAccount = null
+      codexError = formatCodexError(error)
+    }
+  }
+
+  async function handleCodexLogin() {
+    isCodexLoggingIn = true
+    codexError = null
+    codexUserCode = null
+
+    try {
+      const login = await codexService.startLogin()
+      codexLoginId = login.loginId
+      codexUserCode = login.userCode || null
+      const loginUrl = login.authUrl ?? login.verificationUrl
+      if (!loginUrl) {
+        throw new Error('Codex did not return a sign-in URL')
+      }
+      await openUrl(loginUrl)
+    } catch (error) {
+      const loginId = codexLoginId
+      codexLoginId = null
+      if (loginId) await codexService.cancelLogin(loginId).catch(() => undefined)
+      isCodexLoggingIn = false
+      codexError = formatCodexError(error)
+    }
+  }
+
+  async function handleCodexCancel() {
+    const loginId = codexLoginId
+    codexLoginId = null
+    isCodexLoggingIn = false
+    codexUserCode = null
+    if (!loginId) return
+
+    try {
+      await codexService.cancelLogin(loginId)
+    } catch (error) {
+      codexError = formatCodexError(error)
+    }
+  }
+
+  async function handleCodexLogout() {
+    codexError = null
+    if (codexLoginId) await handleCodexCancel()
+    try {
+      await codexService.logout()
+      codexAccount = null
+      codexUserCode = null
+      formFetchedModels = []
+    } catch (error) {
+      codexError = formatCodexError(error)
+    }
+  }
 
   function startEdit(profile: APIProfile) {
     if (editingProfileId && editingProfileId !== profile.id && !isNewProfile) {
@@ -58,12 +143,14 @@
     formHiddenModels = [...(profile.hiddenModels ?? [])]
     formFavoriteModels = [...(profile.favoriteModels ?? [])]
     formPingEnabled = profile.pingEnabled ?? false
+    if (isCodexProvider()) void loadCodexAccount()
     prevPingEnabled = formPingEnabled
     fetchError = null
     openCollapsibles = new SvelteSet([...openCollapsibles, profile.id])
   }
 
   function startNewProfile() {
+    if (codexLoginId) void handleCodexCancel()
     editingProfileId = crypto.randomUUID()
     isNewProfile = true
     formName = ''
@@ -80,6 +167,7 @@
   }
 
   function cancelEdit() {
+    if (codexLoginId) void handleCodexCancel()
     editingProfileId = null
     isNewProfile = false
     fetchError = null
@@ -94,7 +182,7 @@
       name: formName.trim(),
       providerType: formProviderType,
       baseUrl: formBaseUrl.trim().replace(/\/$/, '') || undefined,
-      apiKey: formApiKey,
+      apiKey: isCodexProvider() ? '' : formApiKey,
       customModels: formCustomModels,
       fetchedModels: formFetchedModels,
       hiddenModels: formHiddenModels,
@@ -200,6 +288,7 @@
       openCollapsibles = new SvelteSet(openCollapsibles)
 
       if (editingProfileId === profile.id) {
+        if (codexLoginId) void handleCodexCancel()
         flushAutoSave()
         editingProfileId = null
       }
@@ -222,7 +311,7 @@
       name: formName.trim(),
       providerType: formProviderType,
       baseUrl: formBaseUrl.trim().replace(/\/$/, '') || undefined,
-      apiKey: formApiKey,
+      apiKey: isCodexProvider() ? '' : formApiKey,
       customModels: formCustomModels,
       fetchedModels: formFetchedModels,
       hiddenModels: formHiddenModels,
@@ -283,20 +372,57 @@
 
   onDestroy(() => {
     mounted = false
+    if (codexLoginId) void codexService.cancelLogin(codexLoginId).catch(() => undefined)
+    unlistenCodexLogin?.()
     flushAutoSave()
   })
 
-  // Fix #1: shared handler to avoid duplication between new-profile and edit forms
+  function handleCodexLoginCompleted(payload: CodexLoginCompleted) {
+    if (!codexLoginId || (payload.loginId && payload.loginId !== codexLoginId)) return
+    codexLoginId = null
+    isCodexLoggingIn = false
+    codexUserCode = null
+    if (!payload.success) {
+      codexError = payload.error || 'Codex sign-in was not completed'
+      return
+    }
+
+    codexError = null
+    void loadCodexAccount()
+  }
+
+  onMount(() => {
+    void listen<CodexLoginCompleted>('codex-login-completed', (event) => {
+      handleCodexLoginCompleted(event.payload)
+    })
+      .then((unlisten) => {
+        if (mounted) unlistenCodexLogin = unlisten
+        else unlisten()
+      })
+      .catch(() => {
+        // The event bridge is unavailable outside the Tauri runtime.
+      })
+  })
+
   function handleProviderTypeChange(v: ProviderType) {
+    if (!isCodexProvider(v) && codexLoginId) void handleCodexCancel()
     formProviderType = v
     formName = PROVIDERS[v].name
     formBaseUrl = ''
+    if (isCodexProvider(v)) formApiKey = ''
     formFetchedModels = []
     formCustomModels = []
     formHiddenModels = []
     formFavoriteModels = []
     if (!isPingEligibleProvider(v)) formPingEnabled = false
     fetchError = null
+    codexError = null
+    codexUserCode = null
+    if (isCodexProvider(v)) {
+      void loadCodexAccount()
+    } else {
+      codexAccount = null
+    }
   }
 </script>
 
@@ -338,7 +464,14 @@
           bind:pingEnabled={formPingEnabled}
           {isFetchingModels}
           {fetchError}
+          {codexAccount}
+          {codexUserCode}
+          {isCodexLoggingIn}
+          {codexError}
           onFetchModels={handleFetchModels}
+          onCodexLogin={handleCodexLogin}
+          onCodexCancel={handleCodexCancel}
+          onCodexLogout={handleCodexLogout}
           onProviderTypeChange={handleProviderTypeChange}
           onRemoveFetchedModel={handleRemoveFetchedModel}
           onRemoveCustomModel={handleRemoveCustomModel}
@@ -451,7 +584,14 @@
                 bind:pingEnabled={formPingEnabled}
                 {isFetchingModels}
                 {fetchError}
+                {codexAccount}
+                {codexUserCode}
+                {isCodexLoggingIn}
+                {codexError}
                 onFetchModels={handleFetchModels}
+                onCodexLogin={handleCodexLogin}
+                onCodexCancel={handleCodexCancel}
+                onCodexLogout={handleCodexLogout}
                 onProviderTypeChange={handleProviderTypeChange}
                 onRemoveFetchedModel={handleRemoveFetchedModel}
                 onRemoveCustomModel={handleRemoveCustomModel}

@@ -118,6 +118,22 @@ export function migrateWorldStateBudget<T extends { tier3WholesaleWordBudget: nu
   return rest as T
 }
 
+/**
+ * The OAuth-backed Codex transport is now the sole Codex provider. Profiles saved under the
+ * previous provider IDs keep their models and credentials, but use the single current ID.
+ */
+export function migrateCodexProvider<T extends { providerType: string; name: string }>(
+  profile: T,
+): T {
+  const isLegacyProvider = profile.providerType === 'openai-codex-direct'
+  if (!isLegacyProvider) return profile
+
+  return {
+    ...profile,
+    providerType: 'openai-codex',
+  }
+}
+
 // ============================================================================
 // Reasoning effort
 // ============================================================================
