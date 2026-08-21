@@ -19,11 +19,12 @@ import {
   generateImage as registryGenerateImage,
   supportsImageGeneration,
 } from './providers/registry'
+import { recordImageResult } from './imageUtils'
 import { database } from '$lib/services/database'
 import { settings } from '$lib/stores/settings.svelte'
 import { emitImageQueued, emitImageReady } from '$lib/services/events'
 import { normalizeImageDataUrl, expectedPixels, type ImageSpec } from '$lib/utils/image'
-import { DEFAULT_FALLBACK_STYLE_PROMPT } from './constants'
+import { resolveStylePrompt } from './stylePrompt'
 import { createLogger } from '$lib/log'
 import type { Character, EmbeddedImage } from '$lib/types'
 
@@ -46,6 +47,15 @@ export class InlineImageTracker {
   private processedTags = new Set<string>()
   /** Pending image generations (results stored in memory until flushed) */
   private pendingImages: PendingImage[] = []
+  /**
+   * Generations that have started but not yet reached `pendingImages`.
+   *
+   * `startGeneration` only registers a tag after an async style-prompt lookup, so a tag
+   * from the last streamed chunk is still in flight when the entry is saved. A flush that
+   * does not wait for these leaves their images generated but unrecorded, and an
+   * unrecorded image is deleted from the narration at render time.
+   */
+  private starting = new Set<Promise<void>>()
 
   constructor(
     private storyId: string,
@@ -61,10 +71,17 @@ export class InlineImageTracker {
    */
   processChunk(accumulatedContent: string, referenceMode: boolean): void {
     const tags = extractPicTags(accumulatedContent)
+    // 0 means unlimited, matching the non-streaming path in InlineImageService.
+    const maxImages = settings.systemServicesSettings.imageGeneration.maxImagesPerMessage ?? 3
 
     for (const tag of tags) {
       if (this.processedTags.has(tag.originalTag)) {
         continue
+      }
+
+      if (maxImages !== 0 && this.processedTags.size >= maxImages) {
+        log('Reached the per-message image limit, ignoring the remaining tags', { maxImages })
+        return
       }
 
       this.processedTags.add(tag.originalTag)
@@ -74,10 +91,12 @@ export class InlineImageTracker {
         characters: tag.characters,
       })
 
-      // Fire-and-forget: style prompt fetch + generation start is async
-      this.startGeneration(tag, referenceMode).catch((error) => {
-        log('startGeneration failed', { error })
-      })
+      const started: Promise<void> = this.startGeneration(tag, referenceMode)
+        .catch((error) => {
+          log('startGeneration failed', { error })
+        })
+        .finally(() => this.starting.delete(started))
+      this.starting.add(started)
     }
   }
 
@@ -131,7 +150,7 @@ export class InlineImageTracker {
     if (!supportsImageGeneration(profile.providerType)) return
 
     // Build full prompt with style
-    const stylePrompt = await this.getStylePrompt(imageSettings.styleId)
+    const stylePrompt = await resolveStylePrompt(this.storyId, imageSettings.styleId)
     const fullPrompt = `${tag.prompt}. ${stylePrompt}`
 
     log('Starting async image generation', {
@@ -195,26 +214,16 @@ export class InlineImageTracker {
   }
 
   /**
-   * Get the style prompt for the selected style ID.
-   * Image style templates are external (raw text) -- fetched directly from the database.
-   */
-  private async getStylePrompt(styleId: string): Promise<string> {
-    try {
-      const template = await database.getPackTemplate('default-pack', styleId)
-      if (template?.content) return template.content
-    } catch {
-      // Template not found
-    }
-
-    return DEFAULT_FALLBACK_STYLE_PROMPT
-  }
-
-  /**
    * Flush all pending images to the database.
    * Creates records immediately with 'generating' status, then updates when done.
    * Call this AFTER the story entry has been created.
    */
   async flushToDatabase(): Promise<void> {
+    // A tag that arrives while we wait joins the set, so drain it rather than snapshot it.
+    while (this.starting.size > 0) {
+      await Promise.all(this.starting)
+    }
+
     if (this.pendingImages.length === 0) {
       log('No pending images to flush')
       return
@@ -251,20 +260,12 @@ export class InlineImageTracker {
 
       // Update record when generation completes (non-blocking)
       pending.generationPromise
-        .then(async (result) => {
-          await database.updateEmbeddedImage(pending.id, {
-            imageData: result.base64 || '',
-            status: result.base64 ? 'complete' : 'failed',
-            errorMessage: result.error,
-          })
-          emitImageReady(pending.id, this.entryId, !!result.base64)
-          log('Image record updated', {
-            imageId: pending.id,
-            status: result.base64 ? 'complete' : 'failed',
-          })
-        })
+        .then((result) => recordImageResult(pending.id, this.entryId, result))
         .catch((error) => {
           log('Failed to update image record', { imageId: pending.id, error })
+          // The `Queued` above is still outstanding: a rejected generation that never
+          // emits `Ready` leaves the header counting an image that will never arrive.
+          emitImageReady(pending.id, this.entryId, false)
         })
     }
 
@@ -285,6 +286,6 @@ export class InlineImageTracker {
    * Check if there are pending images being generated.
    */
   get hasPendingImages(): boolean {
-    return this.pendingImages.length > 0
+    return this.pendingImages.length > 0 || this.starting.size > 0
   }
 }

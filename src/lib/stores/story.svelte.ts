@@ -20,6 +20,7 @@ import type {
   LocationBeforeState,
   ItemBeforeState,
   StoryBeatBeforeState,
+  ImageGenerationMode,
 } from '$lib/types'
 import { database } from '$lib/services/database'
 import { rollbackService } from '$lib/services/rollbackService'
@@ -45,10 +46,18 @@ import {
 } from '$lib/services/events'
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { aiService } from '$lib/services/ai'
-import { ChapterBatchService, type WorldState } from '$lib/services/generation'
+import {
+  ChapterBatchService,
+  buildLoreManagementCallbacks,
+  buildLoreManagementUICallbacks,
+  resolveCharacterPresence,
+  type WorldState,
+} from '$lib/services/generation'
 import { createLogger } from '$lib/log'
+import { sameEntityName } from '$lib/utils/text'
 import { grammarService } from '$lib/services/grammar'
 import { clearTier3SelectionCache } from '$lib/services/ai'
+import { clearImageMarkerCache } from '$lib/services/image'
 
 const log = createLogger('StoryStore')
 
@@ -512,6 +521,7 @@ class StoryStore {
     this.invalidateChapterCache()
     grammarService.clearEntityWords()
     clearTier3SelectionCache()
+    clearImageMarkerCache()
   }
 
   // Close the current story and reset state
@@ -519,6 +529,11 @@ class StoryStore {
     this.resetStoryState()
     this.currentBgImage = null
     this.branches = []
+    // The image indicators are not gated on there being a story, so anything still in
+    // flight would keep counting in the library, against a story that is no longer open.
+    // Late `ImageReady` events from those generations clamp at zero rather than going
+    // negative.
+    ui.resetImageGenerationState()
     log('Story closed')
   }
 
@@ -540,6 +555,7 @@ class StoryStore {
 
     // Whatever the previous story left cached is about a pool this one does not have.
     clearTier3SelectionCache()
+    clearImageMarkerCache()
 
     this.currentStory = story
     this.currentBgImage = await database.getBackgroundForBranch(storyId, story.currentBranchId)
@@ -620,6 +636,25 @@ class StoryStore {
     // Load persisted suggestions for creative-writing mode
     if (story.mode === 'creative-writing') {
       await ui.loadSuggestions(storyId)
+    }
+
+    // The settings-keyed cache above is empty for a story that never generated choices in this
+    // app (e.g. a fresh import): fall back to the last narration entry's own suggestedActions,
+    // same as switchBranch does, so an imported story doesn't open with choices silently missing.
+    //
+    // Restore only. Opening a story must never trigger generation: the delete-path variant would
+    // also arm `suggestionsRegenerationNeeded`, which costs a model call on every open of a story
+    // that legitimately has no choices — and on a story with no entries yet the flag would simply
+    // stay armed until the first turn ends, firing a second, redundant round of choices on top of
+    // the one the pipeline had just produced.
+    //
+    // Requiring the last entry to be a narration is what keeps the restore honest: with a
+    // trailing user_action (an app closed mid-turn) the last narration's choices are the ones the
+    // player already spent, and showing them again would also write them back to the cache.
+    const hasPersistedChoices =
+      story.mode === 'adventure' ? ui.actionChoices.length > 0 : ui.suggestions.length > 0
+    if (!hasPersistedChoices && this.entries[this.entries.length - 1]?.type === 'narration') {
+      this.restoreSuggestedActionsFromLastNarration()
     }
 
     // Set mobile-friendly defaults (close sidebar, etc.)
@@ -826,28 +861,43 @@ class StoryStore {
   }
 
   /**
+   * Restore suggested actions from the last narration entry's own `suggestedActions`.
+   *
+   * Pure restore: it does not clear anything and does not request regeneration, so a caller that
+   * merely opened a story cannot end up spending a model call. `restoreSuggestedActionsAfterDelete`
+   * is the variant that adds those two effects, and it is the only one that should be used after
+   * time-travel. Returns true if saved actions were found.
+   */
+  private restoreSuggestedActionsFromLastNarration(): boolean {
+    if (!this.currentStory) return false
+
+    // Actions attach to narration entries
+    const lastNarration = [...this.entries].reverse().find((e) => e.type === 'narration')
+    if (!lastNarration) return false
+
+    const restored = ui.restoreSuggestedActionsFromEntry(
+      this.storyMode,
+      lastNarration.suggestedActions,
+      this.currentStory.id,
+    )
+    if (restored) {
+      log('Restored suggested actions from entry at position', lastNarration.position)
+    }
+    return restored
+  }
+
+  /**
    * Restore suggested actions from the new last narration entry after time-travel (delete).
    * Returns true if saved actions were found and restored, false if regeneration is needed.
    */
   private restoreSuggestedActionsAfterDelete(): boolean {
     if (!this.currentStory) return false
 
-    // Find the new last narration entry (actions attach to narration entries)
-    const lastNarration = [...this.entries].reverse().find((e) => e.type === 'narration')
-
     const storyMode = this.storyMode
     const storyId = this.currentStory.id
 
-    if (lastNarration) {
-      const restored = ui.restoreSuggestedActionsFromEntry(
-        storyMode,
-        lastNarration.suggestedActions,
-        storyId,
-      )
-      if (restored) {
-        log('Restored suggested actions from entry at position', lastNarration.position)
-        return true
-      }
+    if (this.restoreSuggestedActionsFromLastNarration()) {
+      return true
     }
 
     // No saved actions found — clear current ones so stale actions don't persist
@@ -1897,6 +1947,7 @@ class StoryStore {
    */
   async addLorebookEntry(
     entryData: Omit<Entry, 'id' | 'storyId' | 'createdAt' | 'updatedAt' | 'branchId'> & {
+      id?: string
       branchId?: string | null
     },
   ): Promise<Entry> {
@@ -1905,7 +1956,7 @@ class StoryStore {
     const now = Date.now()
     const entry: Entry = {
       ...entryData,
-      id: crypto.randomUUID(),
+      id: entryData.id ?? crypto.randomUUID(),
       storyId: this.currentStory.id,
       createdAt: now,
       updatedAt: now,
@@ -2109,9 +2160,7 @@ class StoryStore {
 
       // Snapshot characters that will be updated
       for (const update of result.entryUpdates.characterUpdates) {
-        const existing = this.characters.find(
-          (c) => c.name.toLowerCase() === update.name.toLowerCase(),
-        )
+        const existing = this.characters.find((c) => sameEntityName(c.name, update.name))
         if (existing) {
           charactersBefore.push({
             id: existing.id,
@@ -2127,9 +2176,7 @@ class StoryStore {
 
       // Snapshot locations that will be updated
       for (const update of result.entryUpdates.locationUpdates) {
-        const existing = this.locations.find(
-          (l) => l.name.toLowerCase() === update.name.toLowerCase(),
-        )
+        const existing = this.locations.find((l) => sameEntityName(l.name, update.name))
         if (existing) {
           locationsBefore.push({
             id: existing.id,
@@ -2144,7 +2191,7 @@ class StoryStore {
 
       // Snapshot items that will be updated
       for (const update of result.entryUpdates.itemUpdates) {
-        const existing = this.items.find((i) => i.name.toLowerCase() === update.name.toLowerCase())
+        const existing = this.items.find((i) => sameEntityName(i.name, update.name))
         if (existing) {
           itemsBefore.push({
             id: existing.id,
@@ -2159,9 +2206,7 @@ class StoryStore {
 
       // Snapshot story beats that will be updated
       for (const update of result.entryUpdates.storyBeatUpdates) {
-        const existing = this.storyBeats.find(
-          (b) => b.title.toLowerCase() === update.title.toLowerCase(),
-        )
+        const existing = this.storyBeats.find((b) => sameEntityName(b.title, update.title))
         if (existing) {
           storyBeatsBefore.push({
             id: existing.id,
@@ -2176,8 +2221,8 @@ class StoryStore {
 
       // Also snapshot locations that might be affected by currentLocationName scene change
       if (result.scene.currentLocationName) {
-        const locationName = result.scene.currentLocationName.toLowerCase()
-        const loc = this.locations.find((l) => l.name.toLowerCase() === locationName)
+        const locationName = result.scene.currentLocationName
+        const loc = this.locations.find((l) => sameEntityName(l.name, locationName))
         if (loc && !locationsBefore.some((lb) => lb.id === loc.id)) {
           locationsBefore.push({
             id: loc.id,
@@ -2194,14 +2239,12 @@ class StoryStore {
     // Apply character updates
     for (const update of result.entryUpdates.characterUpdates) {
       await this.wrapUpdate('Update character', update.name, async () => {
-        let existing = this.characters.find(
-          (c) => c.name.toLowerCase() === update.name.toLowerCase(),
-        )
+        let existing = this.characters.find((c) => sameEntityName(c.name, update.name))
 
         // If character doesn't exist yet, create it first
         if (!existing) {
-          const newCharData = result.entryUpdates.newCharacters.find(
-            (nc) => nc.name.toLowerCase() === update.name.toLowerCase(),
+          const newCharData = result.entryUpdates.newCharacters.find((nc) =>
+            sameEntityName(nc.name, update.name),
           )
           log('Creating character from update (not found):', update.name)
           const charMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2291,15 +2334,13 @@ class StoryStore {
     // Apply location updates
     for (const update of result.entryUpdates.locationUpdates) {
       await this.wrapUpdate('Update location', update.name, async () => {
-        let existing = this.locations.find(
-          (l) => l.name.toLowerCase() === update.name.toLowerCase(),
-        )
+        let existing = this.locations.find((l) => sameEntityName(l.name, update.name))
 
         // If location doesn't exist yet, create it first
         if (!existing) {
           // Check if newLocations has data for this name
-          const newLocData = result.entryUpdates.newLocations.find(
-            (nl) => nl.name.toLowerCase() === update.name.toLowerCase(),
+          const newLocData = result.entryUpdates.newLocations.find((nl) =>
+            sameEntityName(nl.name, update.name),
           )
           log('Creating location from update (not found):', update.name)
           const locMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2318,7 +2359,8 @@ class StoryStore {
             name: newLocData?.name ?? update.name,
             description: newLocData?.description ?? null,
             visited: newLocData?.visited ?? false,
-            current: newLocData?.current ?? false,
+            // Only `scene.currentLocationName` moves the scene.
+            current: false,
             connections: [],
             metadata: locMetadata,
             branchId: this.currentStory?.currentBranchId ?? null,
@@ -2357,49 +2399,6 @@ class StoryStore {
           // COW: ensure entity is owned by current branch before updating
           const { entity: ownedLoc, wasCowed: locWasCowed } = await this.cowLocation(existing)
 
-          if (update.changes.current === true) {
-            changes.visited = true
-            if (this.isCowBranch()) {
-              // COW-aware: targeted updates instead of blanket clear
-              const prevCurrent = this.locations.find((l) => l.current && l.id !== ownedLoc.id)
-              if (prevCurrent) {
-                const { entity: ownedPrev, wasCowed: prevWasCowed } =
-                  await this.cowLocation(prevCurrent)
-                await database.updateLocation(ownedPrev.id, { current: false })
-                this.locations = this.locations.map((l) =>
-                  l.id === ownedPrev.id ? { ...l, current: false } : l,
-                )
-                if (prevWasCowed && trackingEnabled) {
-                  createdLocationIds.push(ownedPrev.id)
-                  const prevIdx = locationsBefore.findIndex((lb) => lb.id === prevCurrent.id)
-                  if (prevIdx !== -1) locationsBefore.splice(prevIdx, 1)
-                }
-              }
-              await database.updateLocation(ownedLoc.id, { ...changes, current: true })
-              this.locations = this.locations.map((l) =>
-                l.id === ownedLoc.id ? { ...l, ...changes, current: true, visited: true } : l,
-              )
-            } else {
-              await database.setCurrentLocation(storyId, ownedLoc.id)
-              if (Object.keys(changes).length > 0) {
-                await database.updateLocation(ownedLoc.id, changes)
-              }
-              this.locations = this.locations.map((l) => {
-                if (l.id === ownedLoc.id) {
-                  return { ...l, ...changes, current: true, visited: true }
-                }
-                return { ...l, current: false }
-              })
-            }
-            if (locWasCowed && trackingEnabled) {
-              createdLocationIds.push(ownedLoc.id)
-              const idx = locationsBefore.findIndex((lb) => lb.id === existing.id)
-              if (idx !== -1) locationsBefore.splice(idx, 1)
-            }
-            return
-          }
-
-          if (update.changes.current === false) changes.current = false
           if (Object.keys(changes).length === 0) {
             // Even if no changes, track COW if it happened
             if (locWasCowed && trackingEnabled) {
@@ -2425,12 +2424,12 @@ class StoryStore {
     // Apply item updates
     for (const update of result.entryUpdates.itemUpdates) {
       await this.wrapUpdate('Update item', update.name, async () => {
-        let existing = this.items.find((i) => i.name.toLowerCase() === update.name.toLowerCase())
+        let existing = this.items.find((i) => sameEntityName(i.name, update.name))
 
         // If item doesn't exist yet, create it first
         if (!existing) {
-          const newItemData = result.entryUpdates.newItems.find(
-            (ni) => ni.name.toLowerCase() === update.name.toLowerCase(),
+          const newItemData = result.entryUpdates.newItems.find((ni) =>
+            sameEntityName(ni.name, update.name),
           )
           log('Creating item from update (not found):', update.name)
           const itemMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2490,14 +2489,12 @@ class StoryStore {
     // Apply story beat updates (mark as completed/failed)
     for (const update of result.entryUpdates.storyBeatUpdates) {
       await this.wrapUpdate('Update story beat', update.title, async () => {
-        let existing = this.storyBeats.find(
-          (b) => b.title.toLowerCase() === update.title.toLowerCase(),
-        )
+        let existing = this.storyBeats.find((b) => sameEntityName(b.title, update.title))
 
         // If story beat doesn't exist yet, create it first
         if (!existing) {
-          const newBeatData = result.entryUpdates.newStoryBeats.find(
-            (nb) => nb.title.toLowerCase() === update.title.toLowerCase(),
+          const newBeatData = result.entryUpdates.newStoryBeats.find((nb) =>
+            sameEntityName(nb.title, update.title),
           )
           log('Creating story beat from update (not found):', update.title)
           const beatMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2564,9 +2561,7 @@ class StoryStore {
     // Add new characters (check for duplicates)
     for (const newChar of result.entryUpdates.newCharacters) {
       await this.wrapUpdate('Add character', newChar.name, async () => {
-        const exists = this.characters.some(
-          (c) => c.name.toLowerCase() === newChar.name.toLowerCase(),
-        )
+        const exists = this.characters.some((c) => sameEntityName(c.name, newChar.name))
         if (!exists) {
           log('Adding new character:', newChar.name)
           const charMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2601,8 +2596,8 @@ class StoryStore {
     // Runs before newLocations so stubs are available for merging
     if (result.scene.currentLocationName) {
       await this.wrapUpdate('Set scene location', result.scene.currentLocationName, async () => {
-        const locationName = result.scene.currentLocationName!.toLowerCase()
-        let currentLoc = this.locations.find((l) => l.name.toLowerCase() === locationName)
+        const locationName = result.scene.currentLocationName!
+        let currentLoc = this.locations.find((l) => sameEntityName(l.name, locationName))
 
         // If location doesn't exist yet, create a stub
         if (!currentLoc) {
@@ -2671,9 +2666,7 @@ class StoryStore {
     // Add new locations (check for duplicates, merge into recently created)
     for (const newLoc of result.entryUpdates.newLocations) {
       await this.wrapUpdate('Add location', newLoc.name, async () => {
-        const existing = this.locations.find(
-          (l) => l.name.toLowerCase() === newLoc.name.toLowerCase(),
-        )
+        const existing = this.locations.find((l) => sameEntityName(l.name, newLoc.name))
         if (existing && createdLocationIds.includes(existing.id)) {
           // Merge into location created earlier in this classification run
           // (e.g. stub from scene.currentLocationName or from update handler)
@@ -2684,10 +2677,6 @@ class StoryStore {
           }
           if (newLoc.visited !== undefined && newLoc.visited !== existing.visited) {
             changes.visited = newLoc.visited
-          }
-          if (newLoc.current && !existing.current) {
-            changes.current = true
-            changes.visited = true
           }
           // Merge inline runtime variable values into metadata if present
           const newLocInlineVars = extractInlineCustomVars(
@@ -2705,25 +2694,6 @@ class StoryStore {
           }
         } else if (!existing) {
           log('Adding new location:', newLoc.name)
-          // If this is the current location, unset others first
-          if (newLoc.current) {
-            if (this.isCowBranch()) {
-              // COW-aware: targeted unset of previous current
-              const prevCurrent = this.locations.find((l) => l.current)
-              if (prevCurrent) {
-                const { entity: ownedPrev } = await this.cowLocation(prevCurrent)
-                await database.updateLocation(ownedPrev.id, { current: false })
-                this.locations = this.locations.map((l) =>
-                  l.id === ownedPrev.id ? { ...l, current: false } : l,
-                )
-              }
-            } else {
-              this.locations = this.locations.map((l) => ({ ...l, current: false }))
-              for (const l of this.locations) {
-                await database.updateLocation(l.id, { current: false })
-              }
-            }
-          }
           const locMetadata: Record<string, unknown> = { source: 'classifier' }
           const newLocInlineVars = extractInlineCustomVars(
             newLoc as unknown as Record<string, unknown>,
@@ -2738,7 +2708,8 @@ class StoryStore {
             name: newLoc.name,
             description: newLoc.description ?? null,
             visited: newLoc.visited ?? false,
-            current: newLoc.current ?? false,
+            // Only `scene.currentLocationName` moves the scene, and it runs before this.
+            current: false,
             connections: [],
             metadata: locMetadata,
             branchId: this.currentStory?.currentBranchId ?? null,
@@ -2753,7 +2724,7 @@ class StoryStore {
     // Add new items (check for duplicates)
     for (const newItem of result.entryUpdates.newItems) {
       await this.wrapUpdate('Add item', newItem.name, async () => {
-        const exists = this.items.some((i) => i.name.toLowerCase() === newItem.name.toLowerCase())
+        const exists = this.items.some((i) => sameEntityName(i.name, newItem.name))
         if (!exists) {
           log('Adding new item:', newItem.name)
           const itemMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2785,9 +2756,7 @@ class StoryStore {
     // Add new story beats (check for duplicates)
     for (const newBeat of result.entryUpdates.newStoryBeats) {
       await this.wrapUpdate('Add story beat', newBeat.title, async () => {
-        const exists = this.storyBeats.some(
-          (b) => b.title.toLowerCase() === newBeat.title.toLowerCase(),
-        )
+        const exists = this.storyBeats.some((b) => sameEntityName(b.title, newBeat.title))
         if (!exists) {
           log('Adding new story beat:', newBeat.title)
           const beatMetadata: Record<string, unknown> = { source: 'classifier' }
@@ -2814,6 +2783,53 @@ class StoryStore {
           if (trackingEnabled) createdStoryBeatIds.push(beat.id)
         }
       })
+    }
+
+    // Reconcile who is in the scene. Last, so the characters this classification created
+    // are already in `this.characters` and the explicit updates above have had their say.
+    const presenceChanges = resolveCharacterPresence({
+      characters: this.characters,
+      presentNames: result.scene.presentCharacterNames ?? [],
+      newNames: result.entryUpdates.newCharacters.map((c) => c.name),
+      explicitStatusNames: result.entryUpdates.characterUpdates
+        .filter((u) => u.changes.status !== undefined)
+        .map((u) => u.name),
+      hadError: !!result._error,
+    })
+
+    for (const change of presenceChanges) {
+      const char = this.characters.find((c) => c.id === change.id)
+      if (!char) continue
+
+      await this.wrapUpdate(
+        change.to === 'active' ? 'Character enters scene' : 'Character leaves scene',
+        char.name,
+        async () => {
+          if (trackingEnabled && !charactersBefore.some((cb) => cb.id === char.id)) {
+            charactersBefore.push({
+              id: char.id,
+              name: char.name,
+              status: char.status,
+              relationship: char.relationship,
+              traits: [...char.traits],
+              visualDescriptors: { ...char.visualDescriptors },
+              metadata: char.metadata ? { ...char.metadata } : null,
+            })
+          }
+
+          const { entity: ownedChar, wasCowed } = await this.cowCharacter(char)
+          await database.updateCharacter(ownedChar.id, { status: change.to })
+          this.characters = this.characters.map((c) =>
+            c.id === ownedChar.id ? { ...c, status: change.to } : c,
+          )
+
+          if (wasCowed && trackingEnabled) {
+            createdCharacterIds.push(ownedChar.id)
+            const idx = charactersBefore.findIndex((cb) => cb.id === char.id)
+            if (idx !== -1) charactersBefore.splice(idx, 1)
+          }
+        },
+      )
     }
 
     // Apply time progression from scene data
@@ -2884,12 +2900,17 @@ class StoryStore {
       result.entryUpdates.characterUpdates.length > 0 ||
       result.entryUpdates.locationUpdates.length > 0 ||
       result.entryUpdates.itemUpdates.length > 0 ||
-      result.entryUpdates.storyBeatUpdates.length > 0
+      result.entryUpdates.storyBeatUpdates.length > 0 ||
+      // Presence is inferred from `scene`, not from `entryUpdates`, so a turn whose only
+      // effect is someone walking out wrote statuses and announced nothing.
+      presenceChanges.length > 0
 
     if (hasChanges) {
       emitStateUpdated({
         characters:
-          result.entryUpdates.newCharacters.length + result.entryUpdates.characterUpdates.length,
+          result.entryUpdates.newCharacters.length +
+          result.entryUpdates.characterUpdates.length +
+          presenceChanges.length,
         locations:
           result.entryUpdates.newLocations.length + result.entryUpdates.locationUpdates.length,
         items: result.entryUpdates.newItems.length + result.entryUpdates.itemUpdates.length,
@@ -3243,6 +3264,7 @@ class StoryStore {
 
     // Generate summary with previous chapters as context
     const chapterData = await aiService.summarizeChapter(
+      this.currentStory?.id,
       chapterEntries,
       previousChapters,
       this.currentStory?.mode ?? 'adventure',
@@ -3286,8 +3308,24 @@ class StoryStore {
   }
 
   // Create a manual chapter at a specific entry index
-  async createManualChapter(endEntryIndex: number): Promise<void> {
+  /** @returns whether a chapter was actually written; false is a refusal, not a failure. */
+  async createManualChapter(endEntryIndex: number): Promise<boolean> {
     if (!this.currentStory) throw new Error('No story loaded')
+
+    // The button is disabled while a turn's background tasks run, but that is the visible
+    // half: the check that has to hold is here, because both paths call
+    // `buildAndSaveChapter` over `lastChapterEndIndex`, and two of them racing produce two
+    // chapters covering the same entries.
+    if (ui.backgroundTasksActiveFor(this.currentStory.id, this.currentStory.currentBranchId)) {
+      log('Background chapter work in flight, refusing manual chapter creation')
+      // Said out loud as well as returned: the caller closes the modal either way, so a
+      // silent refusal looks exactly like a chapter that was created.
+      ui.showToast(
+        'A chapter is already being written for this turn. Try again once it is done.',
+        'warning',
+      )
+      return false
+    }
 
     // Find the start index (after the last chapter or beginning)
     const startIndex = this.lastChapterEndIndex
@@ -3299,6 +3337,7 @@ class StoryStore {
 
     const chapter = await this.buildAndSaveChapter(startIndex, endEntryIndex)
     log('Manual chapter created:', chapter.number, chapter.title)
+    return true
   }
 
   /**
@@ -3353,7 +3392,7 @@ class StoryStore {
           includeClassification: options.includeClassification,
           storyId: this.currentStory.id,
           currentBranchId: this.currentStory.currentBranchId,
-          lorebookEntries: this.lorebookEntries,
+          getLorebookEntries: () => this.lorebookEntries,
           mode: this.currentStory.mode ?? 'adventure',
           pov: this.pov,
           tense: this.tense,
@@ -3369,36 +3408,15 @@ class StoryStore {
           onClassificationProgress: (current, total) => {
             this.chapterizationClassificationProgress = { current, total }
           },
-          loreCallbacks: {
-            onCreateEntry: async (entry) => {
-              await this.addLorebookEntry(entry)
+          loreCallbacks: buildLoreManagementCallbacks({
+            storyId: this.currentStory.id,
+            branchId: this.currentStory.currentBranchId,
+          }),
+          loreUICallbacks: buildLoreManagementUICallbacks({
+            onStatus: (status) => {
+              this.chapterizationStatus = status
             },
-            onUpdateEntry: this.updateLorebookEntry.bind(this),
-            onDeleteEntry: this.deleteLorebookEntry.bind(this),
-            onMergeEntries: async (entryIds, mergedEntry) => {
-              await this.deleteLorebookEntries(entryIds)
-              await this.addLorebookEntry(mergedEntry)
-            },
-            onQueryChapter: async (chapterNumber, question) =>
-              aiService.answerChapterQuestion(
-                chapterNumber,
-                question,
-                this.currentBranchChapters,
-                this.getChapterEntries.bind(this),
-                this.chapterReadBudget,
-              ),
-          },
-          loreUICallbacks: {
-            onStart: () => {
-              this.chapterizationStatus = 'Updating lorebook...'
-            },
-            onProgress: (message) => {
-              this.chapterizationStatus = message
-            },
-            onComplete: () => {
-              this.chapterizationStatus = null
-            },
-          },
+          }),
         },
       )
 
@@ -3883,6 +3901,7 @@ class StoryStore {
     // verdict. The key covers this on its own now; clearing keeps the cache from
     // depending on that alone, as it already does on story switch.
     clearTier3SelectionCache()
+    clearImageMarkerCache()
 
     // Announce once entries and caches are correct. Emitted before the
     // background/suggestion restores below so a failure in either can't
@@ -4469,7 +4488,7 @@ class StoryStore {
       tone?: string
       themes?: string[]
       visualProseMode?: boolean
-      imageGenerationMode?: 'none' | 'agentic' | 'inline'
+      imageGenerationMode?: ImageGenerationMode
       backgroundImagesEnabled?: boolean
       referenceMode?: boolean
     }

@@ -11,7 +11,14 @@ import { CharacterCardImport } from '$lib/services/characterCardImport'
 import { LorebookImportExport } from '$lib/services/lorebookImportExport'
 import { replaceUserPlaceholders } from '$lib/components/wizard/wizardTypes'
 import type { ImportedLorebookItem } from '$lib/components/wizard/wizardTypes'
-import type { StoryMode, POV, VaultCharacter, VaultLorebook, VaultLorebookEntry } from '$lib/types'
+import type {
+  StoryMode,
+  POV,
+  VaultCharacter,
+  VaultLorebook,
+  VaultLorebookEntry,
+  ImageGenerationMode,
+} from '$lib/types'
 import type {
   ExpandedSetting,
   GeneratedCharacter,
@@ -59,7 +66,7 @@ export class STImportWizardStore {
   totalSteps = 8
 
   // Portrait generation/upload (Step 6)
-  image = new ImageStore()
+  image = new ImageStore(() => this.selectedPackId)
 
   // Step 1: File Uploads
   chatParseResult = $state<STChatParseResult | null>(null)
@@ -121,7 +128,7 @@ export class STImportWizardStore {
   selectedTense = $state<Tense>('present')
   tone = $state('immersive and engaging')
   visualProseMode = $state(false)
-  imageGenerationMode = $state<'none' | 'agentic' | 'inline'>('none')
+  imageGenerationMode = $state<ImageGenerationMode>('none')
   backgroundImagesEnabled = $state(false)
   referenceMode = $state(false)
   importChatAsEntries = $state(false) // true = import chat, false = fresh start with card opening
@@ -383,10 +390,12 @@ export class STImportWizardStore {
       // Tag which call failed — Promise.all alone would collapse both
       // into a single opaque rejection.
       const [result, sanitized] = await Promise.all([
-        CharacterCardImport.clean(this.cardRawJson, this.selectedGenre).catch((err) => {
-          throw new Error(`Scenario extraction failed: ${describeAIError(err)}`)
-        }),
-        CharacterCardImport.sanitize(this.cardRawJson).catch((err) => {
+        CharacterCardImport.clean(this.selectedPackId, this.cardRawJson, this.selectedGenre).catch(
+          (err) => {
+            throw new Error(`Scenario extraction failed: ${describeAIError(err)}`)
+          },
+        ),
+        CharacterCardImport.sanitize(this.selectedPackId, this.cardRawJson).catch((err) => {
           throw new Error(`Character sanitization failed: ${describeAIError(err)}`)
         }),
       ])
@@ -562,6 +571,7 @@ export class STImportWizardStore {
           : undefined
 
       this.expandedSetting = await scenarioService.expandSetting(
+        this.selectedPackId,
         this.settingSeed,
         this.selectedGenre,
         this.customGenre || undefined,

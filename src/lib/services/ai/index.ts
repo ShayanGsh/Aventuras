@@ -26,14 +26,13 @@ import {
   emitImageAnalysisComplete,
   emitImageAnalysisFailed,
   emitImageQueued,
-  emitImageReady,
   emitBackgroundImageAnalysisStarted,
   emitBackgroundImageAnalysisComplete,
   emitBackgroundImageAnalysisFailed,
   emitBackgroundImageQueued,
   emitBackgroundImageReady,
 } from '$lib/services/events'
-import type { PromptContext } from '$lib/services/generation'
+import type { PromptContext, LoreManagementCallbacks } from '$lib/services/generation'
 import type {
   Chapter,
   Character,
@@ -55,15 +54,17 @@ import type {
   TimeTracker,
 } from '$lib/types'
 import { normalizeImageDataUrl, expectedPixels, type ImageSpec } from '$lib/utils/image'
-import type { StreamChunk } from './core'
+import type { StreamChunk } from './core/types'
+import { recentStoryBudgetChars } from './core/defaults'
+import { MIN_RECENT_ENTRIES_FOR_LORE, splitRecentTail } from './retrieval/recentTail'
 import { serviceFactory } from './core/factory'
 import {
-  DEFAULT_FALLBACK_STYLE_PROMPT,
   inlineImageService,
   isImageGenerationEnabled as isImageGenerationEnabledUtil,
+  resolveStylePrompt,
+  runImageGeneration,
 } from './image'
 import type { InlineImageContext, ImageAnalysisContext } from './image'
-import { generateImage as registryGenerateImage } from './image/providers/registry'
 import {
   MemoryService,
   NarrativeService,
@@ -87,6 +88,7 @@ import type {
 } from './retrieval/AgenticRetrievalService'
 import type {
   ActionChoicesResult,
+  BackgroundImageAnalysisResult,
   ChapterAnalysis,
   ChapterSummaryResult,
   ChapterTimelineEstimate,
@@ -185,6 +187,8 @@ interface WorldState extends WorldStateContext {
  * against shuffling them wrong was that two of the types happened to differ.
  */
 export interface AgenticRetrievalOptions {
+  /** Story whose pack supplies the template; undefined only outside a story. */
+  storyId: string | undefined
   userInput: string
   recentEntries: StoryEntry[]
   chapters: Chapter[]
@@ -331,15 +335,13 @@ class AIService {
   async generateSuggestions(
     entries: StoryEntry[],
     activeThreads: StoryBeat[],
-    lorebookEntries?: Entry[],
-    promptContext?: PromptContext,
-    latestNarrativeResponse?: string,
-    storyId?: string,
+    lorebookEntries: Entry[] | undefined,
+    latestNarrativeResponse: string | undefined,
+    storyId: string | undefined,
   ): Promise<SuggestionsResult> {
     log('generateSuggestions called', {
       entriesCount: entries.length,
       threadsCount: activeThreads.length,
-      hasPromptContext: !!promptContext,
       lorebookEntriesCount: lorebookEntries?.length ?? 0,
       latestNarrativeLength: latestNarrativeResponse?.length ?? 0,
     })
@@ -361,10 +363,10 @@ class AIService {
     entries: StoryEntry[],
     worldState: WorldState,
     narrativeResponse: string,
-    lorebookEntries?: Entry[],
-    promptContext?: PromptContext,
-    pov?: 'first' | 'second' | 'third',
-    storyId?: string,
+    lorebookEntries: Entry[] | undefined,
+    promptContext: PromptContext | undefined,
+    pov: 'first' | 'second' | 'third' | undefined,
+    storyId: string | undefined,
   ): Promise<ActionChoicesResult> {
     log('generateActionChoices called', {
       entriesCount: entries.length,
@@ -417,6 +419,7 @@ class AIService {
    * Analyze narration entries for style issues.
    */
   async analyzeStyle(
+    storyId: string | undefined,
     entries: StoryEntry[],
     mode: StoryMode = 'adventure',
     pov?: POV,
@@ -424,13 +427,14 @@ class AIService {
     recentEntriesCount?: number,
   ): Promise<StyleReviewResult> {
     const service = serviceFactory.createStyleReviewerService()
-    return service.analyzeStyle(entries, mode, pov, tense, recentEntriesCount)
+    return service.analyzeStyle(storyId, entries, mode, pov, tense, recentEntriesCount)
   }
 
   /**
    * Analyze if a new chapter should be created.
    */
   async analyzeForChapter(
+    storyId: string | undefined,
     entries: StoryEntry[],
     lastChapterEndIndex: number,
     config: MemoryConfig,
@@ -441,6 +445,7 @@ class AIService {
   ): Promise<ChapterAnalysis> {
     const memoryService = serviceFactory.createMemoryService()
     return memoryService.analyzeForChapter(
+      storyId,
       entries,
       lastChapterEndIndex,
       tokensOutsideBuffer,
@@ -454,6 +459,7 @@ class AIService {
    * Generate a summary and metadata for a chapter.
    */
   async summarizeChapter(
+    storyId: string | undefined,
     entries: StoryEntry[],
     previousChapters?: Chapter[],
     mode: StoryMode = 'adventure',
@@ -463,6 +469,7 @@ class AIService {
   ): Promise<ChapterSummaryResult> {
     const memoryService = serviceFactory.createMemoryService()
     return memoryService.summarizeChapter(
+      storyId,
       entries,
       previousChapters,
       mode,
@@ -476,6 +483,7 @@ class AIService {
    * Resummarize an existing chapter.
    */
   async resummarizeChapter(
+    storyId: string | undefined,
     chapter: Chapter,
     entries: StoryEntry[],
     allChapters: Chapter[],
@@ -485,21 +493,33 @@ class AIService {
     summaryDetail: SummaryDetail = 'auto',
   ): Promise<ChapterSummaryResult> {
     const memoryService = serviceFactory.createMemoryService()
-    return memoryService.summarizeChapter(entries, allChapters, mode, pov, tense, summaryDetail)
+    return memoryService.summarizeChapter(
+      storyId,
+      entries,
+      allChapters,
+      mode,
+      pov,
+      tense,
+      summaryDetail,
+    )
   }
 
   /**
    * Estimate in-story time elapsed during a chapter, from its summary alone.
    */
-  async estimateChapterTimeline(summary: string): Promise<ChapterTimelineEstimate> {
+  async estimateChapterTimeline(
+    storyId: string | undefined,
+    summary: string,
+  ): Promise<ChapterTimelineEstimate> {
     const memoryService = serviceFactory.createMemoryService()
-    return memoryService.estimateChapterTimeline(summary)
+    return memoryService.estimateChapterTimeline(storyId, summary)
   }
 
   /**
    * Decide which chapters are relevant for the current context.
    */
   async decideRetrieval(
+    storyId: string | undefined,
     userInput: string,
     recentEntries: StoryEntry[],
     chapters: Chapter[],
@@ -514,7 +534,7 @@ class AIService {
       recentNarrative: recentContent(recentEntries, recentEntries.length, AS_HAYSTACK),
       availableChapters: chapters,
     }
-    return memoryService.decideRetrieval(context, mode, pov, tense)
+    return memoryService.decideRetrieval(storyId, context, mode, pov, tense)
   }
 
   /**
@@ -537,8 +557,8 @@ class AIService {
     worldState: WorldState,
     userInput: string,
     recentEntries: StoryEntry[],
-    config?: Partial<WorldStateInjectorConfig>,
-    options: WorldStateInjectorOptions = {},
+    config: Partial<WorldStateInjectorConfig> | undefined,
+    options: WorldStateInjectorOptions,
   ): Promise<WorldStateInjectionResult> {
     log('buildWorldStateContext called', {
       userInputLength: userInput.length,
@@ -572,7 +592,7 @@ class AIService {
     entries: Entry[],
     userInput: string,
     recentStoryEntries: StoryEntry[],
-    options: EntryRetrievalOptions = {},
+    options: EntryRetrievalOptions,
   ): Promise<EntryRetrievalResult> {
     log('getRelevantLorebookEntries called', {
       totalEntries: entries.length,
@@ -609,27 +629,30 @@ class AIService {
     entries: Entry[],
     recentMessages: StoryEntry[],
     chapters: Chapter[],
-    callbacks: {
-      onCreateEntry: (entry: Entry) => Promise<void>
-      onUpdateEntry: (id: string, updates: Partial<Entry>) => Promise<void>
-      onDeleteEntry: (id: string) => Promise<void>
-      onMergeEntries: (entryIds: string[], mergedEntry: Entry) => Promise<void>
-      onQueryChapter?: (chapterNumber: number, question: string) => Promise<string>
-    },
+    callbacks: LoreManagementCallbacks,
     _mode: StoryMode = 'adventure',
     _pov?: POV,
     _tense?: Tense,
+    tokenThreshold?: number,
   ): Promise<LoreManagementResult> {
-    // Extract recent user action and narrative
-    const recentNarration = recentMessages.filter((m) => m.type === 'narration')
-    const recentActions = recentMessages.filter((m) => m.type === 'user_action')
+    // The story since the last chapter — the only unsummarised material the agent has. It
+    // used to be the single most recent action and narration, which on a story with no
+    // chapters left the agent maintaining a lorebook for a story it could not read.
+    //
+    // Bounded through the same helper the retrieval tail uses, so both sides measure the
+    // same thing the same way. `searchable` is dropped rather than split: there is no grep
+    // here to reach what the budget leaves out.
+    const { shown } = splitRecentTail(
+      recentMessages.filter((m) => m.type === 'narration' || m.type === 'user_action'),
+      recentStoryBudgetChars(tokenThreshold),
+      MIN_RECENT_ENTRIES_FOR_LORE,
+    )
+    const recentStory = shown
+      .map((m) => `[${m.type === 'user_action' ? 'ACTION' : 'NARRATIVE'}] ${m.content}`)
+      .join('\n\n')
 
-    const narrativeResponse =
-      recentNarration.length > 0 ? recentNarration[recentNarration.length - 1].content : ''
-    const userAction =
-      recentActions.length > 0 ? recentActions[recentActions.length - 1].content : ''
-
-    // Build chapters info for lore management
+    // Number, title and summary only: the keyword and character facets were read by
+    // `list_chapters`, which no longer exists.
     // Deep clone to avoid Svelte proxy issues with AI SDK structured cloning
     const chapterInfos = JSON.parse(
       JSON.stringify(
@@ -637,8 +660,6 @@ class AIService {
           number: c.number,
           title: c.title,
           summary: c.summary,
-          keywords: c.keywords,
-          characters: c.characters,
         })),
       ),
     )
@@ -647,11 +668,12 @@ class AIService {
     const service = serviceFactory.createLoreManagementService()
     const sessionResult = await service.runSession({
       storyId,
-      narrativeResponse,
-      userAction,
+      recentStory,
       existingEntries: entries,
       chapters: chapterInfos,
       queryChapter: callbacks.onQueryChapter,
+      keptSeparate: await callbacks.getKeptSeparate?.(),
+      onKeepSeparate: callbacks.onKeepSeparate,
     })
 
     // Build changes array for the result
@@ -674,9 +696,30 @@ class AIService {
       changes.push({ type: 'update', entry })
     }
 
+    // Consolidation is what keeps a lorebook from growing without bound, and it used to
+    // stop here: merges and deletes were approved, logged, then dropped, so every run
+    // re-proposed the same duplicates it had "already" merged.
+    for (const { sources, merged } of sessionResult.merges) {
+      const mergedEntry = { ...merged, id: crypto.randomUUID(), branchId }
+      await callbacks.onMergeEntries(
+        sources.map((e) => e.id),
+        mergedEntry,
+      )
+      changes.push({ type: 'merge', entry: mergedEntry, mergedFrom: sources.map((e) => e.id) })
+    }
+
+    const mergedAway = new Set(sessionResult.merges.flatMap((m) => m.sources.map((e) => e.id)))
+    for (const entry of sessionResult.deletedEntries) {
+      if (mergedAway.has(entry.id)) continue
+      await callbacks.onDeleteEntry(entry.id)
+      changes.push({ type: 'delete', previous: entry })
+    }
+
     log('runLoreManagement complete', {
       created: sessionResult.createdEntries.length,
       updated: sessionResult.updatedEntries.length,
+      deleted: sessionResult.deletedEntries.length,
+      merged: sessionResult.merges.length,
     })
 
     return {
@@ -706,6 +749,7 @@ class AIService {
 
     // Build context for the service
     const context: AgenticRetrievalContext = {
+      storyId: options.storyId,
       userInput,
       // Build recent narrative from entries
       recentNarrative: recentContent(recentEntries, recentEntries.length, AS_PROSE),
@@ -744,6 +788,7 @@ class AIService {
    * Run timeline fill to gather context from past chapters.
    */
   async runTimelineFill(
+    storyId: string | undefined,
     visibleEntries: StoryEntry[],
     chapters: Chapter[],
     getChapterEntries: (chapter: Chapter) => StoryEntry[],
@@ -760,6 +805,7 @@ class AIService {
 
     const timelineFillService = serviceFactory.createTimelineFillService()
     return timelineFillService.runTimelineFill(
+      storyId,
       visibleEntries,
       chapters,
       getChapterEntries,
@@ -772,6 +818,7 @@ class AIService {
    * Answer a specific chapter question.
    */
   async answerChapterQuestion(
+    storyId: string | undefined,
     chapterNumber: number,
     question: string,
     chapters: Chapter[],
@@ -788,6 +835,7 @@ class AIService {
 
     const chapterQueryService = serviceFactory.createChapterQueryService()
     const answer = await chapterQueryService.answerQuestion(
+      storyId,
       question,
       chapters,
       [chapterNumber],
@@ -878,10 +926,11 @@ class AIService {
       .map((c) => c.name)
 
     // Build style prompt
-    const stylePrompt = await this.getStylePrompt(imageSettings.styleId)
+    const stylePrompt = await resolveStylePrompt(context.storyId, imageSettings.styleId)
 
     // Build analysis context
     const analysisContext: ImageAnalysisContext = {
+      storyId: context.storyId,
       narrativeResponse: context.narrativeResponse,
       userAction: context.userAction,
       presentCharacters: context.presentCharacters.map((c) => ({
@@ -904,28 +953,40 @@ class AIService {
     // Emit analysis started
     emitImageAnalysisStarted(context.entryId)
 
+    // The analysis phase and the queueing that follows it get their own try/catch: they
+    // are one `Started` and one `Complete`, and the progress counter reads that pair. A
+    // single catch spanning both emitted `Failed` after `Complete` had already fired for
+    // a throw while queueing, closing an analysis phase twice. `Failed` stays a
+    // notification only (`StoryEntry` toasts on it) — it never ends the phase.
+    let scenes: ImageableScene[]
     try {
       // Create service and identify scenes
       const analysisService = serviceFactory.createImageAnalysisService()
-      const scenes = await analysisService.identifyScenes(analysisContext)
+      scenes = await analysisService.identifyScenes(analysisContext)
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      log('Scene analysis failed', error)
+      emitImageAnalysisComplete(context.entryId, 0, 0)
+      emitImageAnalysisFailed(context.entryId, errorMessage)
+      return
+    }
 
-      if (scenes.length === 0) {
-        log('No imageable scenes identified')
-        emitImageAnalysisComplete(context.entryId, 0, 0)
-        return
-      }
+    // Count portrait generations
+    const portraitCount = scenes.filter((s) => s.generatePortrait).length
+    const sceneCount = scenes.length - portraitCount
 
-      // Count portrait generations
-      const portraitCount = scenes.filter((s) => s.generatePortrait).length
-      const sceneCount = scenes.length - portraitCount
-
+    if (scenes.length === 0) {
+      log('No imageable scenes identified')
+    } else {
       log('Scenes identified', {
         total: scenes.length,
         scenes: sceneCount,
         portraits: portraitCount,
       })
-      emitImageAnalysisComplete(context.entryId, sceneCount, portraitCount)
+    }
+    emitImageAnalysisComplete(context.entryId, sceneCount, portraitCount)
 
+    try {
       // Queue image generation for each scene
       const getImageProfile = context.getImageProfile ?? (() => undefined)
       for (const scene of scenes) {
@@ -941,7 +1002,7 @@ class AIService {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      log('Scene analysis failed', error)
+      log('Queueing analyzed image generation failed', error)
       emitImageAnalysisFailed(context.entryId, errorMessage)
     }
   }
@@ -1017,7 +1078,7 @@ class AIService {
     }
 
     // Build full prompt with style
-    const stylePrompt = await this.getStylePrompt(styleId)
+    const stylePrompt = await resolveStylePrompt(storyId, styleId)
     const fullPrompt = `${scene.prompt}. ${stylePrompt}`
 
     const { width, height } = expectedPixels(sizeToUse)
@@ -1079,10 +1140,7 @@ class AIService {
     referenceImageUrls?: string[],
   ): Promise<void> {
     try {
-      // Update status to generating
-      await database.updateEmbeddedImage(imageId, { status: 'generating' })
-
-      log('Generating analyzed image via SDK', {
+      log('Generating analyzed image', {
         imageId,
         profileId,
         model,
@@ -1090,24 +1148,17 @@ class AIService {
         hasReference: !!referenceImageUrls?.length,
       })
 
-      // Generate image using SDK
-      const result = await registryGenerateImage({
+      const base64 = await runImageGeneration({
+        imageId,
+        entryId,
+        prompt,
         profileId,
         model,
-        prompt,
         size,
         referenceImages: referenceImageUrls,
       })
 
-      if (!result.base64) {
-        throw new Error('No image data returned')
-      }
-
-      // Update record with image data
-      await database.updateEmbeddedImage(imageId, {
-        imageData: result.base64,
-        status: 'complete',
-      })
+      if (!base64) return
 
       // If this was a portrait generation, save to character
       if (scene.generatePortrait && scene.characters.length > 0) {
@@ -1117,24 +1168,17 @@ class AIService {
         )
         if (character) {
           await database.updateCharacter(character.id, {
-            portrait: result.base64,
+            portrait: base64,
           })
           log('Saved portrait to character', { characterId: character.id, name: charName })
         }
       }
 
       log('Analyzed image generated successfully', { imageId })
-      emitImageReady(imageId, entryId, true)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      log('Analyzed image generation failed', { imageId, error: errorMessage })
-
-      await database.updateEmbeddedImage(imageId, {
-        status: 'failed',
-        errorMessage,
-      })
-
-      emitImageReady(imageId, entryId, false)
+      // `runImageGeneration` records its own outcome and balances the queued count, so
+      // anything thrown past it comes from saving the portrait onto its character.
+      log('Saving the generated portrait failed', { imageId, error })
     }
   }
 
@@ -1147,46 +1191,48 @@ class AIService {
     visibleEntries: StoryEntry[],
     onBackgroundImageUpdate: (image: string) => void,
   ): Promise<void> {
+    // Two phases, two separate pairs, each closed in a `finally`: the progress counters
+    // read `Started`/`Complete` and `Queued`/`Ready`, and a single try/catch around both
+    // left them open. A throw while generating reported an analysis failure for a phase
+    // that had already completed, and a generation that simply returned nothing never
+    // balanced its `Queued` at all — the header then showed "1 image" until restart.
+    // `createBackgroundImageService` throws when no background profile is configured, so it
+    // stays inside the try: this is called fire-and-forget from `story.svelte.ts`, where a
+    // rejected promise is an unhandled rejection rather than a logged failure.
+    emitBackgroundImageAnalysisStarted()
+    let service: ReturnType<typeof serviceFactory.createBackgroundImageService> | null = null
+    let result: BackgroundImageAnalysisResult | null = null
     try {
-      const service = serviceFactory.createBackgroundImageService()
-      emitBackgroundImageAnalysisStarted()
-      const result = await service.analyzeResponsesForBackgroundImage(visibleEntries)
-      emitBackgroundImageAnalysisComplete()
-      // Ai returns empty string or short response if no change, otherwise the image prompt
-      if (result.changeNecessary) {
-        log('Background change detected, prompt:', result.prompt)
-        emitBackgroundImageQueued()
-        const image = await service.generateBackgroundImage(result.prompt)
-
-        if (image) {
-          emitBackgroundImageReady()
-          log('Background image generated successfully', { image })
-          onBackgroundImageUpdate(image)
-        } else {
-          log('Background image generation failed')
-        }
-      }
+      service = serviceFactory.createBackgroundImageService()
+      result = await service.analyzeResponsesForBackgroundImage(storyId, visibleEntries)
     } catch (error) {
       emitBackgroundImageAnalysisFailed()
       log('Background image analysis failed', error)
+    } finally {
+      emitBackgroundImageAnalysisComplete()
     }
-  }
 
-  /**
-   * Get the style prompt for the selected style ID.
-   * Image style templates are external (raw text) -- fetched directly from the database.
-   */
-  private async getStylePrompt(styleId: string): Promise<string> {
+    // Ai returns empty string or short response if no change, otherwise the image prompt
+    if (!service || !result?.changeNecessary) return
+
+    log('Background change detected, prompt:', result.prompt)
+    emitBackgroundImageQueued()
     try {
-      const template = await database.getPackTemplate('default-pack', styleId)
-      if (template?.content) {
-        return template.content
-      }
-    } catch {
-      // Template not found, use fallback
-    }
+      const image = await service.generateBackgroundImage(result.prompt)
 
-    return DEFAULT_FALLBACK_STYLE_PROMPT
+      if (image) {
+        log('Background image generated successfully', { image })
+        onBackgroundImageUpdate(image)
+      } else {
+        log('Background image generation failed')
+        emitBackgroundImageAnalysisFailed()
+      }
+    } catch (error) {
+      emitBackgroundImageAnalysisFailed()
+      log('Background image generation failed', error)
+    } finally {
+      emitBackgroundImageReady()
+    }
   }
 
   // ===== Translation Methods =====
@@ -1197,18 +1243,23 @@ class AIService {
   async translateNarration(
     content: string,
     targetLanguage: string,
-    isVisualProse: boolean = false,
+    isVisualProse: boolean,
+    storyId: string | undefined,
   ): Promise<TranslationResult> {
     const service = serviceFactory.createTranslationService('narration')
-    return service.translateNarration(content, targetLanguage, isVisualProse)
+    return service.translateNarration(content, targetLanguage, isVisualProse, storyId)
   }
 
   /**
    * Translate user input to English.
    */
-  async translateInput(content: string, sourceLanguage: string): Promise<TranslationResult> {
+  async translateInput(
+    content: string,
+    sourceLanguage: string,
+    storyId: string | undefined,
+  ): Promise<TranslationResult> {
     const service = serviceFactory.createTranslationService('input')
-    return service.translateInput(content, sourceLanguage)
+    return service.translateInput(content, sourceLanguage, storyId)
   }
 
   /**
@@ -1217,9 +1268,10 @@ class AIService {
   async translateUIElements(
     items: UITranslationItem[],
     targetLanguage: string,
+    storyId: string | undefined,
   ): Promise<UITranslationItem[]> {
     const service = serviceFactory.createTranslationService('ui')
-    return service.translateUIElements(items, targetLanguage)
+    return service.translateUIElements(items, targetLanguage, storyId)
   }
 
   /**
@@ -1228,9 +1280,10 @@ class AIService {
   async translateSuggestions<T extends { text: string; type?: string }>(
     suggestions: T[],
     targetLanguage: string,
+    storyId: string | undefined,
   ): Promise<T[]> {
     const service = serviceFactory.createTranslationService('suggestions')
-    return service.translateSuggestions(suggestions, targetLanguage)
+    return service.translateSuggestions(suggestions, targetLanguage, storyId)
   }
 
   /**
@@ -1239,9 +1292,10 @@ class AIService {
   async translateActionChoices<T extends { text: string; type?: string }>(
     choices: T[],
     targetLanguage: string,
+    storyId: string | undefined,
   ): Promise<T[]> {
     const service = serviceFactory.createTranslationService('actionChoices')
-    return service.translateActionChoices(choices, targetLanguage)
+    return service.translateActionChoices(choices, targetLanguage, storyId)
   }
 
   /**
@@ -1250,9 +1304,10 @@ class AIService {
   async translateWizardContent(
     content: string,
     targetLanguage: string,
+    packId: string | undefined,
   ): Promise<TranslationResult> {
     const service = serviceFactory.createTranslationService('wizard')
-    return service.translateWizardContent(content, targetLanguage)
+    return service.translateWizardContent(content, targetLanguage, packId)
   }
 
   /**
@@ -1261,9 +1316,10 @@ class AIService {
   async translateWizardBatch(
     fields: Record<string, string>,
     targetLanguage: string,
+    packId: string | undefined,
   ): Promise<Record<string, string>> {
     const service = serviceFactory.createTranslationService('wizard')
-    return service.translateWizardBatch(fields, targetLanguage)
+    return service.translateWizardBatch(fields, targetLanguage, packId)
   }
 }
 

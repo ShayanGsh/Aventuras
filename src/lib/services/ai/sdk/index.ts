@@ -17,13 +17,8 @@
  */
 
 // Generate functions
-export {
-  generateStructured,
-  generatePlainText,
-  streamPlainText,
-  streamStructured,
-  buildProviderOptions,
-} from './generate'
+export { generateStructured, generatePlainText } from './generate'
+export { buildProviderOptions } from './presetResolution'
 
 // Provider registry
 export { PROVIDERS } from './providers'
@@ -34,10 +29,8 @@ export {
   extractToolResults,
   extractTerminalToolResult,
   stopOnTerminalTool,
-  stopOnAnyToolCall,
-  stopOnAny,
-  stopOnCostExceeded,
   stopWhenDone,
+  finishOnlyOnLastStep,
 } from './agents'
 
 // Tool factories

@@ -2,10 +2,12 @@
   import { tick } from 'svelte'
   import { ui, type RetrievalCacheKey } from '$lib/stores/ui.svelte'
   import { toRetrievalSnapshot } from '$lib/services/ai/retrieval'
+  import { buildTimelineFillBlock } from '$lib/services/ai/generation'
+  import { joinPromptBlocks } from '$lib/utils/promptBlocks'
   import { countTokens } from '$lib/services/tokenizer'
   import { story } from '$lib/stores/story.svelte'
   import { settings } from '$lib/stores/settings.svelte'
-  import type { EntryMetadata } from '$lib/types'
+  import type { EntryMetadata, Story } from '$lib/types'
   import { aiService } from '$lib/services/ai'
   import { database } from '$lib/services/database'
   import { SimpleActivationTracker } from '$lib/services/ai/retrieval/EntryRetrievalService'
@@ -43,6 +45,8 @@
     WorldStateTranslationService,
     handleEvent,
     SuggestionsRefreshService,
+    buildLoreManagementCallbacks,
+    buildLoreManagementUICallbacks,
     type PipelineDependencies,
     type PipelineConfig,
     type GenerationContext,
@@ -74,7 +78,11 @@
       log('Translating user input', {
         sourceLanguage: translationSettings.sourceLanguage,
       })
-      const result = await aiService.translateInput(content, translationSettings.sourceLanguage)
+      const result = await aiService.translateInput(
+        content,
+        translationSettings.sourceLanguage,
+        story.currentStory?.id,
+      )
       log('Input translated', {
         originalLength: content.length,
         translatedLength: result.translatedContent.length,
@@ -221,13 +229,19 @@
   // Builder Functions
   // ============================================================================
 
-  function buildPipelineDependencies(): PipelineDependencies {
+  /**
+   * `storyId` is the turn's, captured by the caller, not `story.currentStory` read live:
+   * these run across the whole generation, and a story switch mid-turn would otherwise
+   * point the rest of it at another story's pack.
+   */
+  function buildPipelineDependencies(storyId: string): PipelineDependencies {
     return {
       shouldUseAgenticRetrieval: () =>
         aiService.shouldUseAgenticRetrieval(settings.systemServicesSettings.timelineFill),
       runAgenticRetrieval: (options) =>
         aiService.runAgenticRetrieval({
           ...options,
+          storyId,
           getChapterEntries: story.getChapterEntries.bind(story),
           getUnchapterizedEntries: story.getUnchapterizedEntries.bind(story),
         }),
@@ -236,6 +250,7 @@
       // is about `tokenThreshold` tokens by construction. See `story.chapterReadBudget`.
       runTimelineFill: (visibleEntries, chapters, alreadyInContext) =>
         aiService.runTimelineFill(
+          storyId,
           visibleEntries,
           chapters,
           story.getChapterEntries.bind(story),
@@ -244,6 +259,7 @@
         ),
       answerChapterQuestion: (chapterNumber, question, chapters) =>
         aiService.answerChapterQuestion(
+          storyId,
           chapterNumber,
           question,
           chapters,
@@ -279,7 +295,7 @@
     }
   }
 
-  function buildBackgroundTaskDependencies(): BackgroundTaskDependencies {
+  function buildBackgroundTaskDependencies(storyId: string): BackgroundTaskDependencies {
     return {
       chapterService: {
         analyzeForChapter: aiService.analyzeForChapter.bind(aiService),
@@ -290,16 +306,21 @@
       loreManagement: {
         runLoreManagement: aiService.runLoreManagement.bind(aiService),
       },
-      styleReview: { analyzeStyle: aiService.analyzeStyle.bind(aiService) },
+      styleReview: {
+        analyzeStyle: (entries, mode, pov, tense, recentEntriesCount) =>
+          aiService.analyzeStyle(storyId, entries, mode, pov, tense, recentEntriesCount),
+      },
     }
   }
 
   function buildBackgroundTaskInput(
+    currentStory: Story,
     countStyleReview: boolean,
     styleReviewSource: string,
   ): BackgroundTaskInput {
-    const storyId = story.currentStory?.id ?? ''
-    const mode = story.currentStory?.mode ?? 'adventure'
+    const storyId = currentStory.id
+    const branchId = currentStory.currentBranchId ?? null
+    const mode = currentStory.mode ?? 'adventure'
 
     return {
       styleReview: {
@@ -322,7 +343,7 @@
       },
       chapterCheck: {
         storyId,
-        currentBranchId: story.currentStory?.currentBranchId ?? null,
+        currentBranchId: branchId,
         entries: story.entries,
         lastChapterEndIndex: story.lastChapterEndIndex,
         tokensSinceLastChapter: story.tokensSinceLastChapter,
@@ -334,40 +355,22 @@
         pov: story.pov,
         tense: story.tense,
       },
-      loreSession: {
+      // A thunk: read when the session starts, after the classifier and the chapter check
+      // have run. See BackgroundTaskInput.loreSession. The scope is the turn's, matching the
+      // callbacks below, so a story switch refuses the session instead of misdirecting it.
+      loreSession: () => ({
         storyId,
-        currentBranchId: story.currentStory?.currentBranchId ?? null,
+        currentBranchId: branchId,
         lorebookEntries: story.lorebookEntries,
         chapters: story.currentBranchChapters,
+        recentEntries: story.getUnchapterizedEntries(),
         mode,
         pov: story.pov,
         tense: story.tense,
-      },
-      loreCallbacks: {
-        onCreateEntry: async (entry) => {
-          await story.addLorebookEntry(entry)
-        },
-        onUpdateEntry: story.updateLorebookEntry.bind(story),
-        onDeleteEntry: story.deleteLorebookEntry.bind(story),
-        onMergeEntries: async (entryIds, mergedEntry) => {
-          await story.deleteLorebookEntries(entryIds)
-          await story.addLorebookEntry(mergedEntry)
-        },
-        onQueryChapter: async (chapterNumber, question) => {
-          return aiService.answerChapterQuestion(
-            chapterNumber,
-            question,
-            story.currentBranchChapters,
-            story.getChapterEntries.bind(story),
-            story.chapterReadBudget,
-          )
-        },
-      },
-      loreUICallbacks: {
-        onStart: ui.startLoreManagement.bind(ui),
-        onProgress: ui.updateLoreManagementProgress.bind(ui),
-        onComplete: ui.finishLoreManagement.bind(ui),
-      },
+        tokenThreshold: story.memoryConfig.tokenThreshold,
+      }),
+      loreCallbacks: buildLoreManagementCallbacks({ storyId, branchId }),
+      loreUICallbacks: buildLoreManagementUICallbacks(),
     }
   }
 
@@ -560,7 +563,7 @@
         cachedRetrievalResult: options?.cachedRetrievalResult ?? null,
       }
 
-      const deps = buildPipelineDependencies()
+      const deps = buildPipelineDependencies(currentStoryRef.id)
       const pipeline = new GenerationPipeline(deps)
 
       let fullResponse = ''
@@ -626,6 +629,11 @@
           ui.setLastLorebookRetrieval(
             retrievalResult?.lorebookRetrievalResult ?? null,
             retrievalResult?.worldStateRetrievalResult ?? null,
+            // Whichever memory mode ran: agentic fills `chapterContext`, static the Q&A.
+            joinPromptBlocks(
+              retrievalResult?.chapterContext ?? null,
+              buildTimelineFillBlock(retrievalResult?.timelineFillResult),
+            ) || null,
           )
           // Kept for the narration entry below: the in-memory copy dies with the session.
           generationMeta.retrievalSnapshot =
@@ -672,6 +680,17 @@
             messageId: narrationEntry.id,
             result: event.result,
           })
+          // A world update that failed used to be indistinguishable from a turn that
+          // changed nothing: same empty result, no error, no toast. Say it happened —
+          // the alternative is the player noticing a missing location three turns later.
+          if (event.result._error) {
+            console.error('[ActionInput] World update failed:', event.result._error)
+            ui.showToast(
+              'The world update failed for this response. Some or all changes were not ' +
+                'applied — you can regenerate the response to try again.',
+              'warning',
+            )
+          }
           await story.applyClassificationResult(event.result, narrationEntry.id)
           await story.updateEntryTimeEnd(narrationEntry.id)
 
@@ -683,6 +702,7 @@
             translationService
               .translateEntities(
                 {
+                  storyId: currentStoryRef.id,
                   classificationResult: {
                     newCharacters: event.result.entryUpdates.newCharacters,
                     newLocations: event.result.entryUpdates.newLocations,
@@ -757,12 +777,20 @@
         emitTTSQueued(narrationEntry.id, fullResponse)
       }
 
-      const coordinator = new BackgroundTaskCoordinator(buildBackgroundTaskDependencies())
-      const input = buildBackgroundTaskInput(countStyleReview, styleReviewSource)
+      const coordinator = new BackgroundTaskCoordinator(
+        buildBackgroundTaskDependencies(currentStoryRef.id),
+      )
+      const input = buildBackgroundTaskInput(currentStoryRef, countStyleReview, styleReviewSource)
       if (!story.memoryConfig.autoSummarize) input.chapterCheck.tokensOutsideBuffer = 0
+      // Deliberately not awaited — but the flag has to outlive the call, or the Memory
+      // view will offer to create a chapter while this one is being created.
+      const bgStoryId = currentStoryRef.id
+      const bgBranchId = currentStoryRef.currentBranchId ?? null
+      ui.setBackgroundTasksActive(bgStoryId, bgBranchId, true)
       coordinator
         .runBackgroundTasks(input)
         .catch((err) => log('Background tasks failed (non-fatal)', err))
+        .finally(() => ui.setBackgroundTasksActive(bgStoryId, bgBranchId, false))
 
       // Android: notify user that generation completed while app is still backgrounded.
       // Awaited so the foreground service isn't torn down before the notification fires.
@@ -908,13 +936,6 @@
         entries: story.entries,
         pendingQuests: story.pendingQuests,
         storyMode: story.storyMode,
-        pov: story.pov,
-        tense: story.tense,
-        protagonistName,
-        genre: story.currentStory.genre ?? undefined,
-        settingDescription: story.currentStory.description ?? undefined,
-        tone: story.currentStory.settings?.tone ?? undefined,
-        themes: story.currentStory.settings?.themes ?? undefined,
         lastLorebookRetrieval: ui.lastLorebookRetrieval?.all ?? null,
         translationSettings: settings.translationSettings,
       })

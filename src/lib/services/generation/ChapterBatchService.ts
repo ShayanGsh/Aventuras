@@ -31,7 +31,7 @@ const log = createLogger('ChapterBatchService')
 export interface ChapterBatchServiceDependencies {
   buildAndSaveChapter: (startIndex: number, endIndex: number) => Promise<Chapter>
   runLoreManagement: LoreManagementDependencies['runLoreManagement']
-  estimateChapterTimeline: (summary: string) => Promise<TimeTracker>
+  estimateChapterTimeline: (storyId: string | undefined, summary: string) => Promise<TimeTracker>
   getTimeTracker: () => TimeTracker
   setTimeTracker: (time: TimeTracker) => Promise<void>
   updateChapterTimes: (
@@ -54,7 +54,12 @@ export interface ChapterBatchInput {
   includeClassification: boolean
   storyId: string
   currentBranchId: string | null
-  lorebookEntries: Entry[]
+  /**
+   * Read at the lore management phase, not when the batch started: each chapter's
+   * classification creates lorebook entries, and a snapshot taken up front hands the agent
+   * a list missing every one of them.
+   */
+  getLorebookEntries: () => Entry[]
   mode: StoryMode
   pov: POV
   tense: Tense
@@ -120,7 +125,7 @@ export class ChapterBatchService {
       // 2. Timeline (sequential)
       if (input.includeTimeline) {
         callbacks.onTimelineProgress?.(chapterIndex, totalChapters)
-        const delta = await this.deps.estimateChapterTimeline(chapter.summary)
+        const delta = await this.deps.estimateChapterTimeline(input.storyId, chapter.summary)
         const startTime = time
         await this.deps.setTimeTracker({
           years: startTime.years + delta.years,
@@ -170,11 +175,15 @@ export class ChapterBatchService {
         {
           storyId: input.storyId,
           currentBranchId: input.currentBranchId,
-          lorebookEntries: input.lorebookEntries,
+          lorebookEntries: input.getLorebookEntries(),
           chapters,
+          // What the batch left un-chapterized: `planChapterBoundaries` stops
+          // `chapterBuffer` entries short of the end, and no summary covers those.
+          recentEntries: input.entries.slice(boundaries[boundaries.length - 1]?.endIndex ?? 0),
           mode: input.mode,
           pov: input.pov,
           tense: input.tense,
+          tokenThreshold: input.tokenThreshold,
         },
         callbacks.loreCallbacks,
         callbacks.loreUICallbacks,

@@ -113,6 +113,9 @@ export interface MemoryConfig {
 /** Target narration length for a turn. Drives `{{ lengthInstruction }}` in the prompt. */
 export type TargetLength = 'short' | 'medium' | 'long' | 'dynamic'
 
+/** How a story generates images: not at all, on the model's initiative, or embedded in the prose. */
+export type ImageGenerationMode = 'none' | 'agentic' | 'inline'
+
 export interface StorySettings {
   model?: string
   temperature?: number
@@ -122,7 +125,7 @@ export interface StorySettings {
   tone?: string
   themes?: string[]
   visualProseMode?: boolean // Enable HTML/CSS visual output mode
-  imageGenerationMode?: 'none' | 'agentic' | 'inline' // Image generation strategy
+  imageGenerationMode?: ImageGenerationMode
   backgroundImagesEnabled?: boolean
   referenceMode?: boolean
   targetLength?: TargetLength
@@ -493,9 +496,6 @@ export interface Entry {
   injection: EntryInjection
 
   // Metadata
-  firstMentioned: string | null // Entry ID where first mentioned
-  lastMentioned: string | null // Entry ID where last mentioned
-  mentionCount: number
   createdBy: EntryCreator
   createdAt: number
   updatedAt: number
@@ -623,7 +623,7 @@ export interface EntryPreview {
 
 // ===== Lore Management System (per design doc section 3.4) =====
 
-export type LoreChangeType = 'create' | 'update' | 'merge' | 'delete' | 'complete'
+export type LoreChangeType = 'create' | 'update' | 'merge' | 'delete'
 
 export interface LoreChange {
   type: LoreChangeType
@@ -705,11 +705,10 @@ export interface APISettings {
   maxTokens: number
   reasoningEffort: ReasoningEffort // Reasoning effort for the main narrative model
   manualBody: string // Manual request body JSON for the main narrative model
-  enableThinking: boolean // Legacy toggle for reasoning (backward compatibility)
   llmTimeoutMs: number // Request timeout in milliseconds (default: 360000 = 6 minutes)
 }
 
-export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 import type { ThemeId as ThemeIdImport } from '../../themes/themes'
 export type ThemeId = ThemeIdImport
@@ -735,6 +734,14 @@ export interface UISettings {
   showScrollToTop: boolean
   showScrollToBottom: boolean
   storyMaxWidth: '2xl' | '3xl' | '4xl' | '5xl' | '7xl' | '9xl'
+  /** Colour quoted speech in story text. Has no effect on Visual Prose stories. */
+  highlightDialogue: boolean
+  /**
+   * Hex colour for quoted speech. Empty means "the current theme's accent" — with 26
+   * themes a fixed hex clashes somewhere, so the default defers to the theme via a
+   * CSS fallback rather than picking a colour on the user's behalf.
+   */
+  dialogueColor: string
 }
 
 /**
@@ -853,10 +860,6 @@ export interface ExperimentalFeatures {
   generationNotifications: boolean
   /** Android: Include preview of generated text in the completion notification */
   notificationPreview: boolean
-  /** Explicitly position the story view after switching branches */
-  branchSwitchLanding: boolean
-  /** Where to land when branchSwitchLanding is on */
-  branchSwitchLandingTarget: 'last-entry' | 'fork-entry'
 }
 
 // ===== World State Delta Tracking (Phase 1) =====

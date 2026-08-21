@@ -7,7 +7,7 @@ import {
 import { aiService } from '$lib/services/ai'
 import { TranslationService } from '$lib/services/ai/utils/TranslationService'
 import { settings } from '$lib/stores/settings.svelte'
-import type { StoryMode, POV, TargetLength, VaultLorebook } from '$lib/types'
+import type { StoryMode, POV, TargetLength, VaultLorebook, ImageGenerationMode } from '$lib/types'
 import type { ImportedLorebookItem } from '$lib/components/wizard/wizardTypes'
 import type { GeneratedOpening } from '$lib/services/ai/sdk'
 
@@ -28,7 +28,7 @@ export class NarrativeStore {
   selectedTense = $state<Tense>('present')
   tone = $state('immersive and engaging')
   visualProseMode = $state(false)
-  imageGenerationMode = $state<'none' | 'agentic' | 'inline'>('none')
+  imageGenerationMode = $state<ImageGenerationMode>('none')
   backgroundImagesEnabled = $state(false)
   referenceMode = $state(false)
   targetLength = $state<TargetLength>('dynamic')
@@ -55,7 +55,11 @@ export class NarrativeStore {
 
   generatedOpeningDisplay = $derived(this.generatedOpeningTranslated ?? this.generatedOpening)
 
-  constructor() {
+  /** The pack the wizard has selected; read live, since the user can change it mid-wizard. */
+  private packId: () => string | undefined
+
+  constructor(packId: () => string | undefined) {
+    this.packId = packId
     // Update default POV and tense when mode changes
     // $effect(() => {
     //   if (this.selectedMode === "creative-writing") {
@@ -163,6 +167,7 @@ export class NarrativeStore {
 
     try {
       this.generatedOpening = await scenarioService.generateOpening(
+        this.packId(),
         wizardData,
         settings.servicePresetAssignments['wizard:openingGeneration'],
         lorebookContext,
@@ -199,6 +204,7 @@ export class NarrativeStore {
         : this.generatedOpening
 
       this.generatedOpening = await scenarioService.refineOpening(
+        this.packId(),
         wizardData,
         currentOpening,
         settings.servicePresetAssignments['wizard:openingRefinement'],
@@ -232,6 +238,7 @@ export class NarrativeStore {
         const translated = await aiService.translateWizardBatch(
           fields,
           translationSettings.targetLanguage,
+          this.packId(),
         )
 
         this.generatedOpeningTranslated = {

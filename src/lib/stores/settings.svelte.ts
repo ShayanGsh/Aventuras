@@ -21,13 +21,18 @@ import { PROVIDERS } from '$lib/services/ai/sdk/providers/config'
 import {
   AGENTIC_RETRIEVAL_DEFAULTS,
   ENTRY_RETRIEVAL_DEFAULTS,
+  LORE_MANAGEMENT_DEFAULTS,
   MAX_LOREBOOK_ENTRIES_FOR_SUGGESTIONS,
   WORLD_STATE_INJECTION_DEFAULTS,
 } from '$lib/services/ai/core/defaults'
+import { isReasoningOn } from '$lib/services/ai/core/reasoning'
 import {
   migrateCodexProvider,
+  migrateContextWindow,
   migrateEntryRetrieval,
   migrateImageGeneration,
+  migrateReasoningEffort,
+  migrateReasoningIn,
   migrateWorldStateBudget,
   migrateWorldStateInjection,
 } from './settingsMigrations'
@@ -76,33 +81,6 @@ function normalizeProfile(profile: APIProfile): APIProfile {
     hiddenModels: dedupeModelIds(migrated.hiddenModels ?? []),
     favoriteModels: dedupeModelIds(migrated.favoriteModels ?? []),
   }
-}
-
-function normalizeReasoningEffort(value?: string | null): ReasoningEffort | undefined {
-  if (
-    value &&
-    ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)
-  ) {
-    return value != 'off' ? (value as ReasoningEffort) : 'none'
-  } else {
-    return undefined
-  }
-}
-
-function normalizeReasoningForSettings(settings?: any | null): any {
-  if (!settings) return undefined
-
-  for (const key of Object.keys(settings)) {
-    const value = settings[key]
-    if (value && typeof value === 'object') {
-      const normalizedEffort = normalizeReasoningEffort(value.reasoningEffort)
-      if (normalizedEffort !== undefined) {
-        value.reasoningEffort = normalizedEffort
-      }
-    }
-  }
-
-  return settings
 }
 
 // ===== System Services Settings =====
@@ -234,6 +212,10 @@ export function getDefaultAdvancedRequestSettings(): AdvancedRequestSettings {
 }
 
 // Classifier service settings (World State Classifier - extracts entities from narrative)
+/** The window the classifier reads, in whole story entries. Shared with the slider. */
+export const CLASSIFIER_WINDOW_MIN = 2
+export const CLASSIFIER_WINDOW_MAX = 15
+
 export interface ClassifierSettings {
   presetId?: string
   profileId: string | null // API profile to use (null = use default profile)
@@ -242,11 +224,25 @@ export interface ClassifierSettings {
   maxTokens: number
   reasoningEffort: ReasoningEffort
   manualBody: string
-  chatHistoryTruncation: number // Max words per chat history entry (0 = no truncation, up to 500)
+  recentEntriesWindow: number // Recent story entries sent whole as context, 2-15
 }
 
 export function getDefaultClassifierSettings(): ClassifierSettings {
   return getDefaultClassifierSettingsForProvider('openrouter')
+}
+
+/** A stored window outside the slider's range, back inside it. */
+function clampClassifierWindow(loaded: ClassifierSettings): ClassifierSettings {
+  // Checked before rounding: `Math.round(null)` is 0, which is finite and would clamp to the
+  // slider's minimum instead of restoring the default.
+  if (!Number.isFinite(loaded.recentEntriesWindow)) {
+    return { ...loaded, recentEntriesWindow: getDefaultClassifierSettings().recentEntriesWindow }
+  }
+  const window = Math.round(loaded.recentEntriesWindow)
+  return {
+    ...loaded,
+    recentEntriesWindow: Math.min(Math.max(window, CLASSIFIER_WINDOW_MIN), CLASSIFIER_WINDOW_MAX),
+  }
 }
 
 export function getDefaultClassifierSettingsForProvider(
@@ -261,7 +257,7 @@ export function getDefaultClassifierSettingsForProvider(
     maxTokens: 8192,
     reasoningEffort: preset.reasoningEffort,
     manualBody: '',
-    chatHistoryTruncation: 0,
+    recentEntriesWindow: 7,
   }
 }
 
@@ -445,7 +441,7 @@ export function getDefaultLoreManagementSettingsForProvider(
     profileId: null, // Use default profile
     model: preset.model,
     temperature: 0.3,
-    maxIterations: 50,
+    maxIterations: LORE_MANAGEMENT_DEFAULTS.maxIterations,
     reasoningEffort: preset.reasoningEffort,
     manualBody: '',
   }
@@ -592,6 +588,10 @@ export interface EntryRetrievalSettings {
   manualBody: string
 }
 
+/** The window Tier 2/Tier 3 retrieval scans, in whole story entries. Shared with the slider. */
+export const ENTRY_RETRIEVAL_WINDOW_MIN = 2
+export const ENTRY_RETRIEVAL_WINDOW_MAX = 15
+
 export function getDefaultEntryRetrievalSettings(): EntryRetrievalSettings {
   return getDefaultEntryRetrievalSettingsForProvider('openrouter')
 }
@@ -706,9 +706,26 @@ export interface TTSServiceSettings {
   removeAllHtmlContent: boolean // Removes content within all HTML tags (default: false)
   htmlTagsToRemoveContent: string // Specific HTML tags to remove content from (default: span, div)
   provider: 'openai' | 'google' | 'microsoft' // TTS Provider (default: 'openai')
+  /**
+   * Audio container asked of an OpenAI-compatible endpoint.
+   *
+   * MP3 by default, because it is the OpenAI default and roughly a fifth of the bytes.
+   * A local runtime built without an MP3 encoder answers it with a 400 and serves WAV
+   * instead — hence the choice rather than a constant. Other providers do not read this.
+   */
+  responseFormat: 'mp3' | 'wav'
   volume: number // TTS volume 0.0-1.0 (default: 1.0)
   volumeOverride: boolean // Enable volume override (default: false)
   providerVoices: Record<string, string> // Provider-specific voices
+  /**
+   * Speak quoted dialogue in a second voice. Not offered for the Google provider,
+   * where a "voice" is a language code — a second one would read the dialogue in a
+   * different language rather than a different voice.
+   */
+  dialogueVoiceEnabled: boolean
+  dialogueVoice: string // Voice ID for quoted dialogue
+  /** Per-provider memory for the dialogue voice, mirroring `providerVoices`. */
+  providerDialogueVoices: Record<string, string>
 }
 
 export function getDefaultTTSSettings(): TTSServiceSettings {
@@ -725,9 +742,13 @@ export function getDefaultTTSSettings(): TTSServiceSettings {
     removeAllHtmlContent: false,
     htmlTagsToRemoveContent: 'span, div',
     provider: 'openai',
+    responseFormat: 'mp3',
     volume: 1.0,
     volumeOverride: false,
     providerVoices: { openai: 'alloy', google: 'en', microsoft: '' },
+    dialogueVoiceEnabled: false,
+    dialogueVoice: '',
+    providerDialogueVoices: { openai: '', google: '', microsoft: '' },
   }
 }
 
@@ -745,9 +766,13 @@ export function getDefaultTTSSettingsForProvider(_provider: ProviderType): TTSSe
     removeAllHtmlContent: false,
     htmlTagsToRemoveContent: 'span, div',
     provider: 'openai',
+    responseFormat: 'mp3',
     volume: 1.0,
     volumeOverride: false,
     providerVoices: { openai: 'alloy', google: 'en', microsoft: '' },
+    dialogueVoiceEnabled: false,
+    dialogueVoice: '',
+    providerDialogueVoices: { openai: '', google: '', microsoft: '' },
   }
 }
 
@@ -795,10 +820,6 @@ export function getDefaultCharacterCardImportSettingsForProvider(
 
 // Combined system services settings
 // Service-specific settings (only extra fields, not generation config)
-export interface ClassifierSpecificSettings {
-  chatHistoryTruncation: number
-}
-
 export interface LorebookClassifierSpecificSettings {
   batchSize: number
   maxConcurrent: number
@@ -815,8 +836,16 @@ export interface ActionChoicesSpecificSettings {}
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface StyleReviewerSpecificSettings {}
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface LoreManagementSpecificSettings {}
+export interface LoreManagementSpecificSettings {
+  /**
+   * Refuse to let the agent finish while a flagged duplicate group is unresolved.
+   *
+   * Off by default because it changes what a run costs: twenty near-duplicate names turn
+   * one pass into several. Only the obligation is gated — the worklist and the refusal to
+   * create an existing name cost nothing and are always on.
+   */
+  requireDuplicateResolution: boolean
+}
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface InteractiveVaultSpecificSettings {}
@@ -827,18 +856,25 @@ export interface TimelineFillSpecificSettings {}
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface ChapterQuerySpecificSettings {}
 
-// Global context configuration - controls how much context is included in AI operations
+/**
+ * How much recent story each service reads.
+ *
+ * Only what a slider actually drives. `recentEntriesForNarrative` and `userActionsForStyle`
+ * were here with defaults and no reader at all; a stored key nothing consumes is a setting
+ * that lies about being one.
+ */
 export interface ContextWindowSettings {
-  /** Number of recent entries for main narrative context */
-  recentEntriesForNarrative: number
-  /** Number of recent entries for classification/retrieval operations */
-  recentEntriesForRetrieval: number
-  /** Number of recent entries for action choices context */
+  /**
+   * Entries the plot-suggestions service reads.
+   *
+   * Was `recentEntriesForRetrieval`, which named the one thing it does not drive: neither
+   * Entry Retrieval nor Agentic Retrieval ever read it — they have their own
+   * `recentEntriesCount` in `systemServicesSettings` — and `SuggestionsService` is its
+   * only consumer. `migrateContextWindow` carries a tuned value across.
+   */
+  recentEntriesForSuggestions: number
+  /** Entries the action-choices service reads. */
   recentEntriesForChoices: number
-  /** Number of user actions to analyze for style matching */
-  userActionsForStyle: number
-  /** Number of recent entries for lore management context */
-  recentEntriesForLoreManagement: number
 }
 
 // Lorebook injection limits
@@ -862,7 +898,6 @@ export interface TTSSpecificSettings {
 export type CharacterCardImportSpecificSettings = object
 
 export interface ServiceSpecificSettings {
-  classifier: ClassifierSpecificSettings
   lorebookClassifier: LorebookClassifierSpecificSettings
   suggestions: SuggestionsSpecificSettings
   actionChoices: ActionChoicesSpecificSettings
@@ -888,14 +923,11 @@ export function getDefaultExperimentalFeatures(): ExperimentalFeatures {
     backgroundGeneration: false,
     generationNotifications: false,
     notificationPreview: false,
-    branchSwitchLanding: false,
-    branchSwitchLandingTarget: 'last-entry',
   }
 }
 
 export function getDefaultServiceSpecificSettings(): ServiceSpecificSettings {
   return {
-    classifier: getDefaultClassifierSpecificSettings(),
     lorebookClassifier: getDefaultLorebookClassifierSpecificSettings(),
     suggestions: getDefaultSuggestionsSpecificSettings(),
     actionChoices: getDefaultActionChoicesSpecificSettings(),
@@ -909,12 +941,6 @@ export function getDefaultServiceSpecificSettings(): ServiceSpecificSettings {
     characterCardImport: getDefaultCharacterCardImportSpecificSettings(),
     contextWindow: getDefaultContextWindowSettings(),
     lorebookLimits: getDefaultLorebookLimitsSettings(),
-  }
-}
-
-export function getDefaultClassifierSpecificSettings(): ClassifierSpecificSettings {
-  return {
-    chatHistoryTruncation: 0,
   }
 }
 
@@ -938,7 +964,7 @@ export function getDefaultStyleReviewerSpecificSettings(): StyleReviewerSpecific
 }
 
 export function getDefaultLoreManagementSpecificSettings(): LoreManagementSpecificSettings {
-  return {}
+  return { requireDuplicateResolution: LORE_MANAGEMENT_DEFAULTS.requireDuplicateResolution }
 }
 
 export function getDefaultInteractiveVaultSpecificSettings(): InteractiveVaultSpecificSettings {
@@ -974,11 +1000,8 @@ export function getDefaultCharacterCardImportSpecificSettings(): CharacterCardIm
 
 export function getDefaultContextWindowSettings(): ContextWindowSettings {
   return {
-    recentEntriesForNarrative: 20,
-    recentEntriesForRetrieval: 5,
+    recentEntriesForSuggestions: 5,
     recentEntriesForChoices: 5,
-    userActionsForStyle: 6,
-    recentEntriesForLoreManagement: 10,
   }
 }
 
@@ -1183,6 +1206,8 @@ export function getDefaultUISettings(): UISettings {
     showScrollToTop: false,
     showScrollToBottom: true,
     storyMaxWidth: '3xl',
+    highlightDialogue: false,
+    dialogueColor: '',
   }
 }
 
@@ -1249,7 +1274,6 @@ class SettingsStore {
     maxTokens: 8192,
     reasoningEffort: 'none',
     manualBody: '',
-    enableThinking: false,
     llmTimeoutMs: LLM_TIMEOUT_DEFAULT,
   })
 
@@ -1378,16 +1402,14 @@ class SettingsStore {
       if (temperature) this.apiSettings.temperature = parseFloat(temperature)
       if (maxTokens) this.apiSettings.maxTokens = parseInt(maxTokens)
 
-      // Load thinking toggle
-      const enableThinking = await database.getSetting('enable_thinking')
-      if (enableThinking) this.apiSettings.enableThinking = enableThinking === 'true'
-
-      const reasoningEffort = normalizeReasoningEffort(
+      // `enable_thinking` is a legacy boolean, kept only for installs old enough to have no
+      // stored level. It is never the source of truth while `main_reasoning_effort` exists.
+      const reasoningEffort = migrateReasoningEffort(
         await database.getSetting('main_reasoning_effort'),
       )
       if (reasoningEffort) {
         this.apiSettings.reasoningEffort = reasoningEffort
-      } else if (this.apiSettings.enableThinking) {
+      } else if ((await database.getSetting('enable_thinking')) === 'true') {
         this.apiSettings.reasoningEffort = 'high'
       }
 
@@ -1561,6 +1583,14 @@ class SettingsStore {
       if (storyMaxWidth && VALID_STORY_WIDTH_KEYS.includes(storyMaxWidth))
         this.uiSettings.storyMaxWidth = storyMaxWidth as UISettings['storyMaxWidth']
 
+      const highlightDialogue = await database.getSetting('highlight_dialogue')
+      if (highlightDialogue !== null)
+        this.uiSettings.highlightDialogue = highlightDialogue === 'true'
+
+      const dialogueColor = await database.getSetting('dialogue_color')
+      if (dialogueColor !== null) this.uiSettings.dialogueColor = dialogueColor
+      this.applyDialogueHighlight()
+
       const debugMode = await database.getSetting('debug_mode')
       if (debugMode !== null) debug.isActive = this.uiSettings.debugMode = debugMode === 'true'
 
@@ -1579,7 +1609,7 @@ class SettingsStore {
       const wizardSettingsJson = await database.getSetting('wizard_settings')
       if (wizardSettingsJson) {
         try {
-          const loaded = normalizeReasoningForSettings(JSON.parse(wizardSettingsJson))
+          const loaded = migrateReasoningIn(JSON.parse(wizardSettingsJson))
           // Merge with defaults to ensure all fields exist
           const defaults = getDefaultAdvancedWizardSettings()
           this.wizardSettings = {
@@ -1611,7 +1641,7 @@ class SettingsStore {
       const presetsJson = await database.getSetting('generation_presets')
       if (presetsJson) {
         try {
-          const loadedPresets = normalizeReasoningForSettings(JSON.parse(presetsJson))
+          const loadedPresets = migrateReasoningIn(JSON.parse(presetsJson))
           if (Array.isArray(loadedPresets) && loadedPresets.length > 0) {
             // Populate null profileIds with default profile
             const defaultProfileId = this.getDefaultProfileIdForProvider()
@@ -1656,7 +1686,6 @@ class SettingsStore {
         try {
           const loaded = JSON.parse(serviceSpecificJson)
           this.serviceSpecificSettings = {
-            classifier: { ...getDefaultClassifierSpecificSettings(), ...loaded.classifier },
             lorebookClassifier: {
               ...getDefaultLorebookClassifierSpecificSettings(),
               ...loaded.lorebookClassifier,
@@ -1664,7 +1693,12 @@ class SettingsStore {
             suggestions: getDefaultSuggestionsSpecificSettings(),
             actionChoices: getDefaultActionChoicesSpecificSettings(),
             styleReviewer: getDefaultStyleReviewerSpecificSettings(),
-            loreManagement: getDefaultLoreManagementSpecificSettings(),
+            // Merged, not replaced: this block holds a real setting now, and rebuilding it
+            // from defaults would drop the user's choice on every load.
+            loreManagement: {
+              ...getDefaultLoreManagementSpecificSettings(),
+              ...loaded.loreManagement,
+            },
             interactiveVault: getDefaultInteractiveVaultSpecificSettings(),
             timelineFill: getDefaultTimelineFillSpecificSettings(),
             chapterQuery: getDefaultChapterQuerySpecificSettings(),
@@ -1674,7 +1708,10 @@ class SettingsStore {
             },
             tts: { ...getDefaultTTSSpecificSettings(), ...loaded.tts },
             characterCardImport: getDefaultCharacterCardImportSpecificSettings(),
-            contextWindow: { ...getDefaultContextWindowSettings(), ...loaded.contextWindow },
+            contextWindow: migrateContextWindow({
+              ...getDefaultContextWindowSettings(),
+              ...loaded.contextWindow,
+            }),
             lorebookLimits: { ...getDefaultLorebookLimitsSettings(), ...loaded.lorebookLimits },
           }
         } catch {
@@ -1700,12 +1737,14 @@ class SettingsStore {
       const systemServicesJson = await database.getSetting('system_services_settings')
       if (systemServicesJson) {
         try {
-          const loaded = normalizeReasoningForSettings(JSON.parse(systemServicesJson))
+          const loaded = migrateReasoningIn(JSON.parse(systemServicesJson))
           const defaults = getDefaultSystemServicesSettingsForProvider(
             this.getDefaultProviderType(),
           )
           this.systemServicesSettings = {
-            classifier: { ...defaults.classifier, ...loaded.classifier },
+            // `recentEntriesWindow` reaches `recentContent`, where a zero returns the empty
+            // string rather than an error: the classifier would lose its history in silence.
+            classifier: clampClassifierWindow({ ...defaults.classifier, ...loaded.classifier }),
             lorebookClassifier: { ...defaults.lorebookClassifier, ...loaded.lorebookClassifier },
             memory: { ...defaults.memory, ...loaded.memory },
             suggestions: { ...defaults.suggestions, ...loaded.suggestions },
@@ -1867,23 +1906,29 @@ class SettingsStore {
     await database.setSetting('max_tokens', tokens.toString())
   }
 
+  /**
+   * Clamped here rather than only in the form: this value is also the wait before an image
+   * is called stuck, so a zero would offer the retry on every image the moment it queues.
+   */
   async setLlmTimeout(timeoutMs: number) {
-    this.apiSettings.llmTimeoutMs = timeoutMs
-    await database.setSetting('llm_timeout_ms', timeoutMs.toString())
+    // `Math.max(NaN, …)` is NaN, and it would reach both the live setting and the stored
+    // string — where it survives as "NaN" until someone moves the slider.
+    const requested = Number.isFinite(timeoutMs) ? timeoutMs : LLM_TIMEOUT_DEFAULT
+    const clamped = Math.min(Math.max(requested, LLM_TIMEOUT_MIN), LLM_TIMEOUT_MAX)
+    this.apiSettings.llmTimeoutMs = clamped
+    await database.setSetting('llm_timeout_ms', clamped.toString())
   }
 
-  async setEnableThinking(enabled: boolean) {
-    this.apiSettings.enableThinking = enabled
-    this.apiSettings.reasoningEffort = enabled ? 'high' : 'none'
-    await database.setSetting('enable_thinking', enabled.toString())
-    await database.setSetting('main_reasoning_effort', this.apiSettings.reasoningEffort)
-  }
-
+  /**
+   * The only writer of the reasoning level, and of the legacy `enable_thinking` boolean that
+   * shadows it. The flag is derived here rather than tracked: it is a persistence detail for
+   * downgrades, not a second setting, and keeping it as one had eight call sites able to
+   * disagree with the level they sat next to.
+   */
   async setMainReasoningEffort(effort: ReasoningEffort) {
     this.apiSettings.reasoningEffort = effort
-    this.apiSettings.enableThinking = effort !== 'none'
     await database.setSetting('main_reasoning_effort', effort)
-    await database.setSetting('enable_thinking', this.apiSettings.enableThinking.toString())
+    await database.setSetting('enable_thinking', isReasoningOn(effort).toString())
   }
 
   async setMainManualBody(body: string) {
@@ -2619,6 +2664,38 @@ class SettingsStore {
     await database.setSetting('story_max_width', width)
   }
 
+  /**
+   * Publish the dialogue colour to CSS. The toggle and the colour live on the root
+   * element, not in the rendered markup: the `<span class="dialogue-line">` wrappers
+   * are always emitted, so flipping the toggle or dragging the colour picker repaints
+   * without re-rendering a single story entry.
+   */
+  private applyDialogueHighlight() {
+    const root = document.documentElement
+    root.setAttribute('data-dialogue-highlight', this.uiSettings.highlightDialogue ? 'on' : 'off')
+
+    // No stored colour means "use the theme accent", expressed as the CSS fallback of
+    // an unset custom property rather than a hex chosen here for all 26 themes.
+    if (this.uiSettings.dialogueColor) {
+      root.style.setProperty('--dialogue-color', this.uiSettings.dialogueColor)
+    } else {
+      root.style.removeProperty('--dialogue-color')
+    }
+  }
+
+  async setHighlightDialogue(enabled: boolean) {
+    this.uiSettings.highlightDialogue = enabled
+    await database.setSetting('highlight_dialogue', enabled.toString())
+    this.applyDialogueHighlight()
+  }
+
+  /** Pass an empty string to fall back to the current theme's accent colour. */
+  async setDialogueColor(color: string) {
+    this.uiSettings.dialogueColor = color
+    await database.setSetting('dialogue_color', color)
+    this.applyDialogueHighlight()
+  }
+
   async setSidebarWidth(width: number) {
     this.uiSettings.sidebarWidth = width
     await database.setSetting('sidebar_width', width.toString())
@@ -2641,7 +2718,10 @@ class SettingsStore {
       database.setSetting('temperature', this.apiSettings.temperature.toString()),
       database.setSetting('max_tokens', this.apiSettings.maxTokens.toString()),
       database.setSetting('main_reasoning_effort', this.apiSettings.reasoningEffort),
-      database.setSetting('enable_thinking', this.apiSettings.enableThinking.toString()),
+      database.setSetting(
+        'enable_thinking',
+        isReasoningOn(this.apiSettings.reasoningEffort).toString(),
+      ),
       database.setSetting('default_model', this.apiSettings.defaultModel),
       database.setSetting('main_narrative_profile_id', this.apiSettings.mainNarrativeProfileId),
       database.setSetting('main_manual_body', this.apiSettings.manualBody),
@@ -2856,7 +2936,11 @@ class SettingsStore {
     this.systemServicesSettings.loreManagement = getDefaultLoreManagementSettingsForProvider(
       this.providerPreset,
     )
+    // The section's other control lives in the service-specific block, and a reset button
+    // that leaves half the panel where it was is worse than none.
+    this.serviceSpecificSettings.loreManagement = getDefaultLoreManagementSpecificSettings()
     await this.saveSystemServicesSettings()
+    await this.saveServiceSpecificSettings()
   }
 
   async resetInteractiveVaultSettings() {
@@ -2991,7 +3075,6 @@ class SettingsStore {
       maxTokens: 8192,
       reasoningEffort: defaultReasoningEffort,
       manualBody: '',
-      enableThinking: false,
       llmTimeoutMs: LLM_TIMEOUT_DEFAULT,
     }
 
@@ -3009,6 +3092,10 @@ class SettingsStore {
     // Reset system services settings based on provider
     this.systemServicesSettings = getDefaultSystemServicesSettingsForProvider(provider)
 
+    // The half of Advanced Settings that is not a model choice — context window, lorebook
+    // limits, duplicate resolution. "Reset ALL" left every one of them where it was.
+    this.serviceSpecificSettings = getDefaultServiceSpecificSettings()
+
     // Reset update settings
     this.updateSettings = getDefaultUpdateSettings()
     await grammarService.clearCustomWords()
@@ -3017,7 +3104,10 @@ class SettingsStore {
     await database.setSetting('default_model', this.apiSettings.defaultModel)
     await database.setSetting('temperature', this.apiSettings.temperature.toString())
     await database.setSetting('max_tokens', this.apiSettings.maxTokens.toString())
-    await database.setSetting('enable_thinking', this.apiSettings.enableThinking.toString())
+    await database.setSetting(
+      'enable_thinking',
+      isReasoningOn(this.apiSettings.reasoningEffort).toString(),
+    )
     await database.setSetting('main_reasoning_effort', this.apiSettings.reasoningEffort)
     await database.setSetting('main_manual_body', this.apiSettings.manualBody)
     await database.setSetting('theme', this.uiSettings.theme)
@@ -3037,12 +3127,16 @@ class SettingsStore {
       'show_scroll_to_bottom',
       this.uiSettings.showScrollToBottom.toString(),
     )
+    await database.setSetting('highlight_dialogue', this.uiSettings.highlightDialogue.toString())
+    await database.setSetting('dialogue_color', this.uiSettings.dialogueColor)
+    this.applyDialogueHighlight()
     await database.setSetting(
       'advanced_manual_mode',
       this.advancedRequestSettings.manualMode.toString(),
     )
     await this.saveWizardSettings()
     await this.saveSystemServicesSettings()
+    await this.saveServiceSpecificSettings()
     await this.saveUpdateSettings()
     await this.resetGenerationPresets()
     await this.resetServicePresetAssignments()
@@ -3121,13 +3215,15 @@ class SettingsStore {
     this.apiSettings.maxTokens = defaults.services?.narrative.maxTokens ?? 8192
     this.apiSettings.reasoningEffort = defaults.services?.narrative.reasoningEffort ?? 'none'
     this.apiSettings.manualBody = ''
-    this.apiSettings.enableThinking = false
     await database.setSetting('default_model', this.apiSettings.defaultModel)
     await database.setSetting('temperature', this.apiSettings.temperature.toString())
     await database.setSetting('max_tokens', this.apiSettings.maxTokens.toString())
     await database.setSetting('main_reasoning_effort', this.apiSettings.reasoningEffort)
     await database.setSetting('main_manual_body', this.apiSettings.manualBody)
-    await database.setSetting('enable_thinking', this.apiSettings.enableThinking.toString())
+    await database.setSetting(
+      'enable_thinking',
+      isReasoningOn(this.apiSettings.reasoningEffort).toString(),
+    )
 
     // Apply provider-specific defaults to system services
     this.systemServicesSettings = getDefaultSystemServicesSettingsForProvider(provider)
@@ -3397,19 +3493,6 @@ class SettingsStore {
       if (cached?.status === 'auth') return 'auth'
     }
     return null
-  }
-
-  /**
-   * Check whether selecting a model should auto-force reasoning effort to 'high'.
-   * This is a NanoGPT-specific behavior: reasoning models on NanoGPT require
-   * effort set to high (the provider enforces it).
-   */
-  shouldForceHighReasoning(profileId: string | null | undefined, modelId: string): boolean {
-    if (!profileId) return false
-    const profile = this.getProfile(profileId)
-    if (!profile || profile.providerType !== 'nanogpt') return false
-    const model = this.getProfileModels(profileId).find((m) => m.id === modelId)
-    return !!model?.reasoning
   }
 }
 

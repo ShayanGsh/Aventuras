@@ -73,7 +73,32 @@ export type {
 } from './ChapterBatchService'
 
 // Lore management coordinator
-export { LoreManagementCoordinator } from './LoreManagementCoordinator'
+export { runManualLoreManagement } from './manualLoreManagement'
+export {
+  buildLoreManagementCallbacks,
+  buildLoreManagementUICallbacks,
+  type LoreCallbackScope,
+} from './loreCallbacks'
+
+// Duplicate consolidation (the worklist behind the Active Context window)
+export {
+  findAllDuplicates,
+  buildMergePlan,
+  mergeGroup,
+  keepSeparate,
+  forgetKeptSeparate,
+  type ScopedDuplicateGroup,
+  type DuplicateScope,
+} from './entityConsolidation'
+export {
+  applyMergePlan,
+  hasConflicts,
+  APPEND,
+  type MergePlan,
+  type MergeField,
+  type FieldOrigin,
+} from './mergeEntities'
+export { LoreManagementCoordinator, isLoreManagementRunning } from './LoreManagementCoordinator'
 export type {
   LoreManagementCallbacks,
   LoreManagementUICallbacks,
@@ -117,6 +142,10 @@ export type {
   SuggestionsRefreshInput,
   SuggestionsRefreshResult,
 } from './SuggestionsRefreshService'
+
+// Character presence
+export { resolveCharacterPresence } from './characterPresence'
+export type { PresenceInput, PresenceChange } from './characterPresence'
 
 // Pipeline event handler
 export { handleEvent } from './PipelineEventHandler'

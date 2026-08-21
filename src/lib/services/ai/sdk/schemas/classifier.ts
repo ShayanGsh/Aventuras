@@ -84,12 +84,19 @@ export const newCharacterSchema = z.object({
 // Location Schemas
 // ============================================================================
 
+/**
+ * No `current` here: `scene.currentLocationName` is the only thing that moves the scene.
+ * Both existed and both were applied, in an order the model could not see, so a response
+ * naming two different places silently kept whichever ran last.
+ */
 export const locationUpdateSchema = z.object({
   name: z.string().describe('Exact name of existing location'),
   changes: z.object({
-    visited: z.boolean().describe('true if protagonist has been here').optional(),
-    current: z.boolean().describe('true if this is the current scene location').optional(),
-    description: z.string().describe('Complete replacement description').optional(),
+    visited: z.boolean().describe('true if the protagonist has been here').optional(),
+    description: z
+      .string()
+      .describe('Replaces the whole description; only for a location whose current text is shown')
+      .optional(),
     descriptionAddition: z.string().describe('New details learned about location').optional(),
   }),
 })
@@ -97,8 +104,7 @@ export const locationUpdateSchema = z.object({
 export const newLocationSchema = z.object({
   name: z.string().describe("Location's proper name"),
   description: z.string().describe('One sentence description').optional(),
-  visited: z.boolean().describe('true if protagonist has been here').optional(),
-  current: z.boolean().describe('true if this is the current scene location').optional(),
+  visited: z.boolean().describe('true if the protagonist has been here').optional(),
 })
 
 // ============================================================================
@@ -177,7 +183,9 @@ export const sceneSchema = z.object({
     .optional(),
   presentCharacterNames: z
     .array(z.string())
-    .describe('Names of characters physically present')
+    .describe(
+      'Every other character in the scene at the end of the passage, named exactly as the character list spells them. Anyone left out is treated as away',
+    )
     .default([]),
   timeProgression: z
     .enum(['none', 'minutes', 'hours', 'days'])
@@ -226,4 +234,15 @@ export type Scene = z.infer<typeof sceneSchema>
 export type ClassificationResult = z.infer<typeof classificationResultSchema> & {
   /** Internal metadata: runtime variable definitions for use by applyClassificationResult. Not LLM output. */
   _runtimeVarDefs?: RuntimeVariable[]
+  /**
+   * Internal metadata: why this result is thinner than the model's output, if it is.
+   * Not LLM output.
+   *
+   * An empty classification and a failed one are the same object, and the difference
+   * matters to the user — "nothing happened this turn" and "the world update was thrown
+   * away" look identical in the world panel. Set by ClassifierService when the response
+   * failed validation, so the UI can say so instead of leaving the player to notice a
+   * missing location three turns later.
+   */
+  _error?: string
 }

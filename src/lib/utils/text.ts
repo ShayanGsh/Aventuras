@@ -39,6 +39,30 @@ export function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * Whether `needle` occurs in `haystack` as a whole unit — bounded by anything that is not a
+ * letter or a digit, so "Gatto" is not found inside "Cattedrale".
+ *
+ * Both sides are lowercased here; no caller has to do it first. Scripts written without
+ * spaces have no boundary to anchor on, so `entityNameMatches` answers for those before it
+ * gets here.
+ */
+export function containsWholeUnit(haystack: string, needle: string): boolean {
+  const text = haystack.toLowerCase()
+  const unit = needle.toLowerCase().trim()
+  if (!unit) return false
+  if (text.trim() === unit) return true
+
+  let pattern = escapeRegex(unit)
+  if (/^[\p{L}\p{N}]/u.test(unit)) {
+    pattern = '(?<![\\p{L}\\p{N}])' + pattern
+  }
+  if (/[\p{L}\p{N}]$/u.test(unit)) {
+    pattern = pattern + '(?![\\p{L}\\p{N}])'
+  }
+  return new RegExp(pattern, 'u').test(text)
+}
+
 export interface EntityNameMatchOptions {
   /**
    * Also match when a word in `searchText` merely *starts with* the name ("ren" ->
@@ -105,14 +129,7 @@ export function entityNameMatches(
     return haystack.includes(normalizedName)
   }
 
-  let patternStr = escapeRegex(normalizedName)
-  if (/^[\p{L}\p{N}]/u.test(normalizedName)) {
-    patternStr = '(?<![\\p{L}\\p{N}])' + patternStr
-  }
-  if (/[\p{L}\p{N}]$/u.test(normalizedName)) {
-    patternStr = patternStr + '(?![\\p{L}\\p{N}])'
-  }
-  if (new RegExp(patternStr, 'iu').test(haystack)) {
+  if (containsWholeUnit(haystack, normalizedName)) {
     return true
   }
 
@@ -524,28 +541,30 @@ export function createFuzzyTextRegex(text: string): RegExp {
   // 1. Normalize
   const normalized = replaceUncommonCharacters(text)
 
-  // 2. Extract alphanumeric "words"
-  const words = normalized.split(/[^a-zA-Z0-9'’‘‚]+/).filter((word) => word.length > 0)
+  // 2. Extract alphanumeric "words" (Unicode-aware: letters and numbers across scripts)
+  const words = normalized.split(/[^\p{L}\p{N}'’‘‚]+/u).filter((word) => word.length > 0)
 
   if (words.length === 0) {
-    return new RegExp(escapeRegex(text), 'gi')
+    return new RegExp(escapeRegex(text), 'giu')
   }
 
-  // 3. Escape words and handle variants
-  const patternParts = words.map((word) => {
-    return escapeRegex(word).replace(/'/g, "[\\'’‘‚]").replace(/"/g, '[\\"“”„‟]')
-  })
+  // 3. Escape words and handle variants. Only the apostrophe needs a class of its own:
+  // the split above keeps it inside a word, while every other quotation mark is a
+  // separator and is already covered by the fuzzy separator below. It is not
+  // backslash-escaped inside the class — `\'` is an invalid identity escape under the
+  // `u` flag, which made the constructor throw for every text carrying an apostrophe.
+  const patternParts = words.map((word) => escapeRegex(word).replace(/'/g, "['’‘‚]"))
 
   // 4. Join with a "super-fuzzy" separator
   // We strictly forbid newlines that are part of a paragraph break (\\n\\n), on either side,
   // so the match can neither cross a paragraph boundary nor start/end by absorbing one of the
   // two newlines into the match itself (which would delete it once the match gets replaced by
   // a placeholder, collapsing "\n\n" into "\n" and merging the paragraph with the previous one).
-  const fuzzySeparator = '(?:[^a-zA-Z0-9\\n]|(?<!\\n)\\n(?!\\n))*?'
+  const fuzzySeparator = '(?:[^\\p{L}\\p{N}\\n]|(?<!\\n)\\n(?!\\n))*?'
 
   const pattern = fuzzySeparator + patternParts.join(fuzzySeparator) + fuzzySeparator
 
-  return new RegExp(pattern, 'gi')
+  return new RegExp(pattern, 'giu')
 }
 
 const SENTENCE_DELIMITERS = /[.!?\n]/
@@ -610,4 +629,72 @@ export function expandRangeBidirectional(
     start: currentStart,
     end: currentEnd,
   }
+}
+
+/**
+ * Fold away spelling only: case, accents, punctuation, repeated spaces.
+ *
+ * Articles are kept, and that is the whole difference from `normalizeName`. Two names that
+ * differ by an article are the same *subject* but not the same *trigger*: matching is
+ * literal and whole-word, so the alias "The Citadel" fires on that two-word phrase while
+ * the keyword "Citadel" fires on the bare word, and neither makes the other redundant.
+ * Lorebook-entry *identity* is judged by `normalizeName`, which does strip them.
+ *
+ * The character class is `\p{L}\p{N}`, like the rest of this file, and deliberately not
+ * `a-z0-9`: the ASCII form folds every Cyrillic, Greek and CJK name to the empty string,
+ * and empty compares equal to every other one.
+ *
+ * **An apostrophe is removed, not spaced.** It joins rather than divides — a possessive or
+ * an elision — so spacing it split one word into two: `Kaelen's Rest` did not match
+ * `Kaelens Rest`, nor `Vor'koth` match `Vorkoth`.
+ */
+export function foldName(raw: string): string {
+  return raw
+    .normalize('NFD')
+    .replace(/\p{M}+/gu, '')
+    .toLowerCase()
+    .replace(/['’‘ʼ`ʼ]/gu, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
+
+/**
+ * Whether two names refer to the same entity as far as spelling can tell.
+ *
+ * Replaces `a.toLowerCase() === b.toLowerCase()` across the world-state pipeline, adding
+ * accent and punctuation folding — "Elénore"/"Elenore", "Kaelen's Rest"/"Kaelens Rest".
+ * Articles still separate, as they always did. Every call site must agree: a stricter
+ * creation guard paired with a looser lookup loses an update — the lookup misses, the
+ * creation is refused as a duplicate, and the change lands nowhere.
+ *
+ * A name with no letter or digit in it folds to the empty string, and two of those are not
+ * the same entity — they are two names this function cannot read. Answering `true` there is
+ * the `a-z0-9` failure again in a smaller form: it collapses every such name into one.
+ */
+export function sameEntityName(a: string, b: string): boolean {
+  const folded = foldName(a)
+  if (!folded) return false
+  return folded === foldName(b)
+}
+
+/**
+ * Strip the narrator's layout markers from a passage, keeping every word.
+ *
+ * The markers are for a reader; a model asked what happened in the passage only has to
+ * parse them. The text under them is not decoration — a heading like
+ * `### Late Morning | The Grotto Pool` carries the hour and the place, which is exactly
+ * what the scene fields are for. Only a horizontal rule goes entirely, having no text.
+ */
+export function stripNarratorMarkup(content: string): string {
+  return (
+    content
+      .replace(/^[ \t]*([*\-_])(?:[ \t]*\1){2,}[ \t]*$/gm, '')
+      .replace(/^#{1,6}[ \t]+(.*)$/gm, '$1')
+      // One span covering the whole line, so a line carrying two of them keeps both intact
+      // rather than surrendering its inner markers to a match that spans from the first
+      // opener to the last closer.
+      .replace(/^[ \t]*\*\*((?:(?!\*\*).)+)\*\*[ \t]*$/gm, '$1')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+  )
 }

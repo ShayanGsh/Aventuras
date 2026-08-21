@@ -14,8 +14,10 @@ import type {
   EmbeddedImageMeta,
   PersistentCharacterSnapshot,
 } from '$lib/types'
+import * as z from 'zod'
 import type { ActionChoice } from '$lib/services/ai/sdk/schemas/actionchoices'
 import type { Suggestion } from '$lib/services/ai/sdk/schemas/suggestions'
+import { actionChoiceSchema, suggestionSchema } from '$lib/services/ai/sdk/schemas'
 import type { StyleReviewResult } from '$lib/services/ai/generation/StyleReviewerService'
 import type {
   EntryRetrievalResult,
@@ -33,11 +35,14 @@ export interface RetrievalCacheKey {
   actionContent: string
 }
 import type { SyncMode } from '$lib/types/sync'
+import { DESKTOP_BREAKPOINT } from '$lib/constants/layout'
 import { SimpleActivationTracker } from '$lib/services/ai/retrieval/EntryRetrievalService'
 import { database } from '$lib/services/database'
+import { eventBus, type EventType } from '$lib/services/events'
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { StreamingHtmlRenderer } from '$lib/utils/htmlStreaming'
 import { countTokens } from '$lib/services/tokenizer'
+import { branchScopeKey } from '$lib/utils/branchScope'
 
 export type VaultTab = 'characters' | 'lorebooks' | 'scenarios' | 'prompts'
 
@@ -114,9 +119,17 @@ class UIStore {
   isRetryingLastMessage = $state(false) // Hide stop button during completed-message retries
   vaultTab = $state<VaultTab>('characters')
 
-  // Image generation state
-  imageAnalysisInProgress = $state(false) // LLM analyzing narrative for imageable scenes
+  // Image generation state. Both are counts, because the narration analysis and the
+  // background-image analysis run concurrently: as a boolean, whichever finished first
+  // cleared the other one's indicator.
+  private analysesRunning = $state(0) // LLM analyzing narrative for imageable scenes
   imagesGenerating = $state(0) // Count of images currently being generated
+
+  get imageAnalysisInProgress(): boolean {
+    return this.analysesRunning > 0
+  }
+
+  private imageTrackingCleanup: (() => void) | null = null
 
   // Gallery image cache - persists across component unmounts
   private galleryImageCache = new SvelteMap<string, EmbeddedImageMeta[]>()
@@ -130,7 +143,15 @@ class UIStore {
   isStreaming = $state(false)
   private htmlRenderer: StreamingHtmlRenderer | null = null
   private visualProseEntryId: string | null = null
-  private tokenCountInterval: ReturnType<typeof setInterval> | null = null
+  /**
+   * When the streaming token count was last recomputed.
+   *
+   * Counting is a full BPE pass over everything received so far, so a timer re-tokenizes
+   * the whole response several times a second for as long as it runs — and keeps doing it
+   * while the stream is stalled. Throttling the appends instead keeps the same cadence on
+   * screen and does the work only when there is new text.
+   */
+  private lastTokenCountAt = 0
 
   // Scroll break state - persists until user sends a new message
   userScrolledUp = $state(false)
@@ -210,6 +231,12 @@ class UIStore {
   // Lorebook debug state
   lastLorebookRetrieval = $state<EntryRetrievalResult | null>(null)
   lastWorldStateRetrieval = $state<WorldStateInjectionResult | null>(null)
+  /**
+   * The memory block as the narrator got it: the agentic synthesis, or static mode's Q&A.
+   *
+   * The rendered text rather than either mode's result shape. Cleared with the other two.
+   */
+  lastMemoryRetrieval = $state<string | null>(null)
   lorebookDebugOpen = $state(false)
 
   // Lorebook manager state
@@ -242,9 +269,30 @@ class UIStore {
 
   // Lore management mode state
   // When active, the AI is reviewing/updating the lorebook - user editing is locked
+  /**
+   * Branches whose background tasks — chapter threshold check, lore management, style
+   * review — are still running, as `storyId:branchId`.
+   *
+   * They create chapters, so the Memory view must not offer to create one at the same time:
+   * two chapters built from overlapping ranges of the same entries. Per branch rather than
+   * global, because chapters belong to a branch and two branches never collide.
+   *
+   * A **count**, not a flag: the run is not awaited, so turns overlap and a flag would be
+   * cleared by whichever finished first, marking the branch idle with work still in flight.
+   */
+  backgroundTaskBranches = $state<SvelteMap<string, number>>(new SvelteMap())
   loreManagementActive = $state(false)
   loreManagementProgress = $state('')
   loreManagementChanges = $state<number>(0)
+  /**
+   * What the last session reported it did, kept after the run ends.
+   *
+   * It is the only account of what changed in the lorebook, and it used to live in the
+   * progress line and be wiped two seconds later — long enough to notice, not to read.
+   */
+  lastLoreManagementSummary = $state<string | null>(null)
+  lastLoreManagementChanges = $state<number>(0)
+  loreManagementError = $state<string | null>(null)
 
   // Lorebook activation tracking for stickiness
   // Maps entry ID -> last activation position (story entry index)
@@ -341,6 +389,40 @@ class UIStore {
     }
   }
 
+  /**
+   * Get the sidebar out of the way when a sidebar control acts on the main content.
+   * Below DESKTOP_BREAKPOINT the sidebar is a near-fullscreen overlay (see AppShell's
+   * `@media (max-width: 768px)`), so the result of such an action would be invisible.
+   * Not persisted, for the same reason as setMobileDefaults: a mobile layout constraint
+   * must not overwrite the desktop sidebar preference.
+   */
+  closeSidebarOnMobile() {
+    if (typeof window !== 'undefined' && window.innerWidth <= DESKTOP_BREAKPOINT) {
+      this.sidebarOpen = false
+    }
+  }
+
+  /**
+   * A pending request for the story view to bring one entry into view.
+   *
+   * Deliberately durable state rather than an event: the requester is typically another
+   * panel (the Branches sidebar), and AppShell destroys StoryView whenever activePanel
+   * isn't 'story'. An event emitted while switching back would reach nobody, because the
+   * subscriber remounts a tick later. StoryView consumes this once it has a container.
+   */
+  pendingEntryScrollId = $state<string | null>(null)
+
+  requestEntryScroll(entryId: string) {
+    this.pendingEntryScrollId = entryId
+  }
+
+  /** Take the pending request, if any, and clear it. */
+  consumeEntryScroll(): string | null {
+    const entryId = this.pendingEntryScrollId
+    this.pendingEntryScrollId = null
+    return entryId
+  }
+
   openSettings() {
     this.settingsModalOpen = true
   }
@@ -364,32 +446,57 @@ class UIStore {
     this.isRetryingLastMessage = value
   }
 
-  // Image generation state methods
-  setImageAnalysisInProgress(value: boolean) {
-    this.imageAnalysisInProgress = value
+  /**
+   * Track image analysis/generation progress off the event bus.
+   *
+   * This lived in `Header.svelte` — the only component that reads the counts — which made
+   * app-wide bookkeeping depend on a component staying mounted, and made adding an event
+   * three edits instead of one. That is how the `*Failed` events came to be missed.
+   *
+   * Every pair below is exact at the emitting end: a `Started` is always followed by one
+   * `Complete` and a `Queued` by one `Ready`, on the failure paths too. `ImageAnalysisFailed`
+   * is deliberately absent: it is emitted for a failed *generation* as well, where no
+   * analysis is open, so counting it would close an analysis that never started.
+   */
+  initImageTracking() {
+    if (this.imageTrackingCleanup) return
+
+    const endAnalysis = () => {
+      this.analysesRunning = Math.max(0, this.analysesRunning - 1)
+    }
+    const endImage = () => {
+      this.imagesGenerating = Math.max(0, this.imagesGenerating - 1)
+    }
+
+    const handlers: [EventType, () => void][] = [
+      ['ImageAnalysisStarted', () => this.analysesRunning++],
+      ['ImageAnalysisComplete', endAnalysis],
+      ['BackgroundImageAnalysisStarted', () => this.analysesRunning++],
+      ['BackgroundImageAnalysisComplete', endAnalysis],
+      ['ImageQueued', () => this.imagesGenerating++],
+      ['ImageReady', endImage],
+      ['BackgroundImageQueued', () => this.imagesGenerating++],
+      ['BackgroundImageReady', endImage],
+    ]
+
+    const unsubscribes = handlers.map(([type, handler]) => eventBus.subscribe(type, handler))
+    this.imageTrackingCleanup = () => unsubscribes.forEach((unsubscribe) => unsubscribe())
   }
 
-  incrementImagesGenerating() {
-    this.imagesGenerating++
-  }
-
-  decrementImagesGenerating() {
-    this.imagesGenerating = Math.max(0, this.imagesGenerating - 1)
+  /** Clean up the image tracking listeners. */
+  destroyImageTracking() {
+    this.imageTrackingCleanup?.()
+    this.imageTrackingCleanup = null
   }
 
   resetImageGenerationState() {
-    this.imageAnalysisInProgress = false
+    this.analysesRunning = 0
     this.imagesGenerating = 0
   }
 
   // Streaming methods
   startStreaming(visualProseMode = false, entryId?: string) {
-    // Ensure any existing interval is cleared to prevent leaks
-    if (this.tokenCountInterval) {
-      clearInterval(this.tokenCountInterval)
-      this.tokenCountInterval = null
-    }
-
+    this.lastTokenCountAt = 0
     this.isStreaming = true
     this.streamingContent = ''
     this.streamingReasoning = ''
@@ -402,10 +509,14 @@ class UIStore {
       this.htmlRenderer = null
       this.visualProseEntryId = null
     }
-    // Start periodic token counting (every 500ms to avoid performance issues)
-    this.tokenCountInterval = setInterval(() => {
-      this.updateStreamingTokenCount()
-    }, 500)
+  }
+
+  /** Recount at most twice a second, and only when a chunk has just landed. */
+  private countStreamingTokensThrottled() {
+    const now = Date.now()
+    if (now - this.lastTokenCountAt < 500) return
+    this.lastTokenCountAt = now
+    this.updateStreamingTokenCount()
   }
 
   private updateStreamingTokenCount() {
@@ -422,18 +533,15 @@ class UIStore {
     } else {
       this.streamingContent += content
     }
+    this.countStreamingTokensThrottled()
   }
 
   appendReasoningContent(content: string) {
     this.streamingReasoning += content
+    this.countStreamingTokensThrottled()
   }
 
   endStreaming(): string {
-    // Clear token count interval
-    if (this.tokenCountInterval) {
-      clearInterval(this.tokenCountInterval)
-      this.tokenCountInterval = null
-    }
     // Final token count update
     this.updateStreamingTokenCount()
 
@@ -1015,41 +1123,67 @@ class UIStore {
    * @param storyMode - 'adventure' or 'creative-writing'
    * @param savedActions - JSON string of ActionChoice[] or Suggestion[] from the entry
    * @param storyId - story ID for persistence
-   * @returns true if actions were restored, false if no saved actions existed
+   * @returns true if actions were restored; false if none could be, in which case the mode's
+   *          actions are left empty rather than holding whatever was on screen before
    */
   restoreSuggestedActionsFromEntry(
     storyMode: string,
     savedActions: string | null | undefined,
     storyId: string,
   ): boolean {
-    if (!savedActions) {
-      // No saved actions — clear current ones
+    // One contract for every failure path below: a false return leaves nothing set. Only the
+    // absent-blob case used to clear, so a malformed or unparseable blob returned false with the
+    // previous entry's choices still on screen, where they read as belonging to this entry.
+    // Callers judge by the return value alone, so the two must not disagree.
+    // The persisted copy goes with the in-memory one, or the next load restores it.
+    const clearForMode = () => {
       if (storyMode === 'adventure') {
-        this.actionChoices = []
+        this.clearActionChoices(storyId)
       } else {
-        this.suggestions = []
+        this.clearSuggestions(storyId)
       }
+    }
+
+    if (!savedActions) {
+      clearForMode()
       return false
     }
 
     try {
       const parsed = JSON.parse(savedActions)
       if (!Array.isArray(parsed) || parsed.length === 0) {
+        clearForMode()
         return false
       }
 
+      // Validated, not cast. This blob is written by our own generator, but it also arrives from
+      // an imported `.avt` or a synced device, and nothing between the file and here checks its
+      // shape. `ActionChoices.svelte` looks up its icon by `choice.type` and renders the result
+      // unconditionally, so a single entry missing that field takes down the whole view.
       if (storyMode === 'adventure') {
-        this.actionChoices = parsed as ActionChoice[]
+        const validated = z.array(actionChoiceSchema).safeParse(parsed)
+        if (!validated.success) {
+          console.warn('[UI] Discarding malformed saved action choices:', validated.error)
+          clearForMode()
+          return false
+        }
+        this.actionChoices = validated.data
         // Also persist to settings so they survive app restart
-        const data: PersistedActionChoices = { storyId, choices: parsed as ActionChoice[] }
+        const data: PersistedActionChoices = { storyId, choices: validated.data }
         database
           .setSetting(this.getActionChoicesKey(storyId), JSON.stringify(data))
           .catch((err) => {
             console.warn('[UI] Failed to persist restored action choices:', err)
           })
       } else {
-        this.suggestions = parsed as Suggestion[]
-        const data: PersistedSuggestions = { storyId, suggestions: parsed as Suggestion[] }
+        const validated = z.array(suggestionSchema).safeParse(parsed)
+        if (!validated.success) {
+          console.warn('[UI] Discarding malformed saved suggestions:', validated.error)
+          clearForMode()
+          return false
+        }
+        this.suggestions = validated.data
+        const data: PersistedSuggestions = { storyId, suggestions: validated.data }
         database.setSetting(this.getSuggestionsKey(storyId), JSON.stringify(data)).catch((err) => {
           console.warn('[UI] Failed to persist restored suggestions:', err)
         })
@@ -1059,6 +1193,7 @@ class UIStore {
       return true
     } catch (err) {
       console.warn('[UI] Failed to parse saved suggested actions:', err)
+      clearForMode()
       return false
     }
   }
@@ -1253,9 +1388,11 @@ class UIStore {
   setLastLorebookRetrieval(
     result: EntryRetrievalResult | null,
     worldState: WorldStateInjectionResult | null = null,
+    memory: string | null = null,
   ) {
     this.lastLorebookRetrieval = result
     this.lastWorldStateRetrieval = worldState
+    this.lastMemoryRetrieval = memory
   }
 
   openLorebookDebug() {
@@ -1341,10 +1478,25 @@ class UIStore {
   }
 
   // Lore management mode methods
+  backgroundTasksActiveFor(storyId: string, branchId: string | null): boolean {
+    return (this.backgroundTaskBranches.get(branchScopeKey(storyId, branchId)) ?? 0) > 0
+  }
+
+  setBackgroundTasksActive(storyId: string, branchId: string | null, active: boolean) {
+    const key = branchScopeKey(storyId, branchId)
+    const running = this.backgroundTaskBranches.get(key) ?? 0
+    if (active) this.backgroundTaskBranches.set(key, running + 1)
+    else if (running <= 1) this.backgroundTaskBranches.delete(key)
+    else this.backgroundTaskBranches.set(key, running - 1)
+  }
+
   startLoreManagement() {
     this.loreManagementActive = true
     this.loreManagementProgress = 'Analyzing story content...'
     this.loreManagementChanges = 0
+    this.loreManagementError = null
+    // The previous run's account stops being true the moment a new one starts writing.
+    this.lastLoreManagementSummary = null
     // Close any open modals/edit modes since user can't edit during lore management
     this.lorebookEditMode = false
     this.lorebookImportModalOpen = false
@@ -1356,6 +1508,20 @@ class UIStore {
     if (changesCount !== undefined) {
       this.loreManagementChanges = changesCount
     }
+  }
+
+  /** Record what a finished session reported, for the panel to show once it is over. */
+  setLoreManagementSummary(summary: string, changeCount: number) {
+    this.lastLoreManagementSummary = summary
+    this.lastLoreManagementChanges = changeCount
+  }
+
+  setLoreManagementError(error: string | null) {
+    this.loreManagementError = error
+  }
+
+  clearLoreManagementError() {
+    this.loreManagementError = null
   }
 
   finishLoreManagement() {

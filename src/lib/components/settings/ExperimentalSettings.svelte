@@ -36,6 +36,7 @@
   import * as Dialog from '$lib/components/ui/dialog'
   import { database } from '$lib/services/database'
   import { isAndroid } from '$lib/utils/platform'
+  import { autosize } from '$lib/utils/autosize'
   import { ask, open } from '@tauri-apps/plugin-dialog'
   import { openFilters } from '$lib/utils/dialogFilters'
   import { invoke } from '@tauri-apps/api/core'
@@ -270,14 +271,6 @@
     await settings.updateExperimentalFeatures({ notificationPreview: checked })
   }
 
-  async function handleBranchSwitchLandingToggle(checked: boolean) {
-    await settings.updateExperimentalFeatures({ branchSwitchLanding: checked })
-  }
-
-  async function handleBranchLandingTargetChange(target: 'last-entry' | 'fork-entry') {
-    await settings.updateExperimentalFeatures({ branchSwitchLandingTarget: target })
-  }
-
   async function handleResetAll() {
     await settings.resetExperimentalFeatures()
     stateTrackingChecked = settings.experimentalFeatures.stateTracking
@@ -479,73 +472,6 @@
 
   <Separator />
 
-  <!-- Branch Switch Landing -->
-  <div class="space-y-5">
-    <div class="flex items-center gap-2">
-      <GitBranch class="text-muted-foreground h-4 w-4" />
-      <Label class="text-sm font-medium">Branch Switch Landing</Label>
-    </div>
-
-    <!-- Master toggle -->
-    <div class="flex flex-row items-center justify-between">
-      <div class="space-y-0.5">
-        <Label>Position story after switching branches</Label>
-        <p class="text-muted-foreground text-xs">
-          Place the story view at a chosen point when you switch branches, instead of keeping the
-          previous branch's scroll position.
-        </p>
-        {#if settings.experimentalFeatures.branchSwitchLanding}
-          <p class="pt-1 text-xs font-medium text-amber-500">
-            Active — the story view will reposition on every branch switch.
-          </p>
-        {/if}
-      </div>
-      <Switch
-        checked={settings.experimentalFeatures.branchSwitchLanding}
-        onCheckedChange={handleBranchSwitchLandingToggle}
-      />
-    </div>
-
-    <!-- Landing target -->
-    <div class="space-y-3 {!settings.experimentalFeatures.branchSwitchLanding ? 'opacity-50' : ''}">
-      <div class="space-y-0.5">
-        <Label>Landing Target</Label>
-        <p class="text-muted-foreground text-xs">
-          Where to land: the end of the branch, or the entry it branched off from.
-        </p>
-        {#if !settings.experimentalFeatures.branchSwitchLanding}
-          <p class="text-muted-foreground pt-1 text-xs italic">
-            Requires Branch Switch Landing to be enabled.
-          </p>
-        {/if}
-      </div>
-      <div class="flex flex-row gap-2">
-        <Button
-          variant={settings.experimentalFeatures.branchSwitchLandingTarget === 'last-entry'
-            ? 'default'
-            : 'outline'}
-          size="sm"
-          disabled={!settings.experimentalFeatures.branchSwitchLanding}
-          onclick={() => handleBranchLandingTargetChange('last-entry')}
-        >
-          Last entry
-        </Button>
-        <Button
-          variant={settings.experimentalFeatures.branchSwitchLandingTarget === 'fork-entry'
-            ? 'default'
-            : 'outline'}
-          size="sm"
-          disabled={!settings.experimentalFeatures.branchSwitchLanding}
-          onclick={() => handleBranchLandingTargetChange('fork-entry')}
-        >
-          Branching checkpoint
-        </Button>
-      </div>
-    </div>
-  </div>
-
-  <Separator />
-
   <!-- Android Background Generation (only shown on Android) -->
   {#if showAndroidSection}
     <div class="space-y-5">
@@ -690,10 +616,11 @@
       <!-- Query Input -->
       <textarea
         bind:value={sqlQuery}
+        use:autosize={{ enabled: true, value: sqlQuery }}
         onkeydown={handleQueryKeydown}
         placeholder="SELECT * FROM stories LIMIT 10;"
         spellcheck={false}
-        class="bg-surface-950 border-surface-700 text-foreground placeholder:text-muted-foreground w-full rounded-md border p-3 font-mono text-xs leading-relaxed focus:ring-1 focus:ring-amber-500/50 focus:outline-none"
+        class="bg-surface-950 border-surface-700 text-foreground placeholder:text-muted-foreground max-h-[50dvh] w-full resize-none rounded-md border p-3 font-mono text-xs leading-relaxed focus:ring-1 focus:ring-amber-500/50 focus:outline-none"
         rows={4}></textarea>
 
       <!-- Actions -->

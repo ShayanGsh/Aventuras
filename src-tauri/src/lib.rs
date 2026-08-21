@@ -4,6 +4,8 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod avt_import;
 mod backup;
 mod codex;
+mod db;
+mod db_tx;
 mod migration_patch;
 mod sync;
 
@@ -241,6 +243,12 @@ pub fn run() {
             sql: include_str!("../migrations/036_pack_template_baseline.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 37,
+            description: "kept_separate",
+            sql: include_str!("../migrations/037_kept_separate.sql"),
+            kind: MigrationKind::Up,
+        },
     ];
 
     #[cfg_attr(not(all(debug_assertions, feature = "devtools")), allow(unused_mut))]
@@ -303,6 +311,7 @@ pub fn run() {
             import_saf_to_temp,
             avt_import::avt_read_light,
             avt_import::avt_import_images,
+            db_tx::db_transaction,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
